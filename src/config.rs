@@ -97,8 +97,22 @@ pub struct AppConfig {
     #[serde(default)]
     pub eq_bands_db: [f32; 5],
 
+    // Loudness normalization (-14.0 LUFS / ITU-R BS.1770-4)
+    #[serde(default = "default_true")]
+    pub loudness_normalization: bool,
+
+    // Discord Rich Presence
+    #[serde(default = "default_true")]
+    pub discord_rpc_enabled: bool,
+    #[serde(default)]
+    pub discord_client_id: String,
+
     // Visual settings
     pub animated_glass_backdrop: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppConfig {
@@ -121,6 +135,9 @@ impl Default for AppConfig {
             auto_analyze_bpm: true,
             eq_preset: EqPreset::Flat,
             eq_bands_db: [0.0; 5],
+            loudness_normalization: true,
+            discord_rpc_enabled: true,
+            discord_client_id: String::new(),
             animated_glass_backdrop: true,
         }
     }

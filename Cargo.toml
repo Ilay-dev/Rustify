@@ -1,6 +1,6 @@
 [package]
 name = "rustify"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "Rustify — Minimalist Liquid Glass Music Player with BPM DJ Mixing"
 
@@ -27,6 +27,7 @@ raw-window-handle = "0.6"
 parking_lot = "0.12"
 crossbeam-channel = "0.5"
 beat-this = { version = "1.1", default-features = false }
+discord-rich-presence = "1.1"
 
 [profile.dev.package."*"]
 opt-level = 3

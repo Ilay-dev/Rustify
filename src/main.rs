@@ -3,6 +3,7 @@
 mod audio;
 mod config;
 mod covers;
+mod discord_rpc;
 mod i18n;
 mod library;
 mod lyrics;

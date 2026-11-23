@@ -1,10 +1,12 @@
 use crate::config::{AppConfig, EqPreset};
+use crate::discord_rpc::RpcStatus;
 use crate::i18n::{tr, Language};
 use crate::ui::icons::Icon;
 use crate::ui::theme::{
     draw_liquid_glass_panel, draw_truncated_text, font_regular, font_semibold, glass_icon_button,
-    glass_pill_button, glass_slider, rgba, GlassLevel, FROST_CTA_IDLE, FROST_CTA_TEXT,
-    GLASS_PILL_IDLE, RIM_BRIGHT, RIM_SUBTLE, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
+    glass_pill_button, glass_slider, glass_toggle, rgba, GlassLevel, FROST_CTA_IDLE,
+    FROST_CTA_TEXT, GLASS_PILL_IDLE, RIM_BRIGHT, RIM_SUBTLE, TEXT_MUTED, TEXT_PRIMARY,
+    TEXT_SECONDARY,
 };
 use egui::{Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
 
@@ -12,6 +14,8 @@ pub enum SettingsAction {
     MusicFolderChanged,
     DjSettingsChanged,
     EqChanged,
+    LoudnessNormChanged,
+    DiscordRpcChanged,
     ReanalyzeAllBpm,
 }
 
@@ -20,6 +24,7 @@ pub fn show_settings_modal(
     screen: Rect,
     open: &mut bool,
     config: &mut AppConfig,
+    rpc_status: RpcStatus,
 ) -> Option<SettingsAction> {
     if !*open {
         return None;
@@ -35,7 +40,7 @@ pub fn show_settings_modal(
     );
 
     let card_w = 516.0f32.min(screen.width() - 40.0);
-    let card_h = 546.0f32.min(screen.height() - 36.0);
+    let card_h = 600.0f32.min(screen.height() - 36.0);
     let card_rect = Rect::from_center_size(screen.center(), Vec2::new(card_w, card_h));
 
     if scrim_resp.clicked()
@@ -68,11 +73,16 @@ pub fn show_settings_modal(
         });
     });
 
-    child.add_space(16.0);
-    let w = inner.width();
+    child.add_space(12.0);
+
+    egui::ScrollArea::vertical()
+        .id_salt("settings_modal_scroll")
+        .auto_shrink([false, false])
+        .show(&mut child, |scroll| {
+            let w = scroll.available_width();
 
     // Row 1: Language [ Deutsch | English ]
-    draw_setting_card(&mut child, w, 48.0, |ui, rect| {
+    draw_setting_card(scroll, w, 48.0, |ui, rect| {
         ui.painter().text(
             Pos2::new(rect.left() + 14.0, rect.center().y),
             Align2::LEFT_CENTER,
@@ -121,10 +131,10 @@ pub fn show_settings_modal(
         }
     });
 
-    child.add_space(8.0);
+    scroll.add_space(8.0);
 
     // Row 2: Music Folder
-    draw_setting_card(&mut child, w, 54.0, |ui, rect| {
+    draw_setting_card(scroll, w, 54.0, |ui, rect| {
         let p = ui.painter();
         p.text(
             Pos2::new(rect.left() + 14.0, rect.top() + 16.0),
@@ -168,10 +178,10 @@ pub fn show_settings_modal(
         }
     });
 
-    child.add_space(8.0);
+    scroll.add_space(8.0);
 
     // Row 3: DJ Crossfade Duration [ 4s | 6s | 8s | 10s | 12s ]
-    draw_setting_card(&mut child, w, 48.0, |ui, rect| {
+    draw_setting_card(scroll, w, 48.0, |ui, rect| {
         ui.painter().text(
             Pos2::new(rect.left() + 14.0, rect.center().y),
             Align2::LEFT_CENTER,
@@ -227,10 +237,10 @@ pub fn show_settings_modal(
         }
     });
 
-    child.add_space(8.0);
+    scroll.add_space(8.0);
 
     // Row 4: BPM & Harmonic Key Re-Analyze
-    draw_setting_card(&mut child, w, 46.0, |ui, rect| {
+    draw_setting_card(scroll, w, 46.0, |ui, rect| {
         ui.painter().text(
             Pos2::new(rect.left() + 14.0, rect.center().y),
             Align2::LEFT_CENTER,
@@ -249,11 +259,11 @@ pub fn show_settings_modal(
         }
     });
 
-    child.add_space(10.0);
+    scroll.add_space(10.0);
 
     // Row 5: Real-Time 5-Band Equalizer & Bass Control
     let is_de = config.language == Language::De;
-    draw_setting_card(&mut child, w, 214.0, |ui, rect| {
+    draw_setting_card(scroll, w, 214.0, |ui, rect| {
         let eq_inner = rect.shrink2(Vec2::new(14.0, 12.0));
         let mut eq_ui = ui.new_child(
             egui::UiBuilder::new()
@@ -465,6 +475,166 @@ pub fn show_settings_modal(
             );
         }
     });
+
+    scroll.add_space(10.0);
+
+    // Row 6: Loudness Normalization (-14 LUFS / ITU-R BS.1770-4)
+    draw_setting_card(scroll, w, 58.0, |ui, rect| {
+        let p = ui.painter();
+        p.text(
+            Pos2::new(rect.left() + 14.0, rect.top() + 19.0),
+            Align2::LEFT_CENTER,
+            if is_de {
+                "Lautstärke-Normalisierung (-14 LUFS)"
+            } else {
+                "Loudness Normalization (-14 LUFS)"
+            },
+            font_semibold(13.0),
+            TEXT_PRIMARY,
+        );
+        draw_truncated_text(
+            p,
+            Rect::from_min_max(
+                Pos2::new(rect.left() + 14.0, rect.top() + 31.0),
+                Pos2::new(rect.right() - 68.0, rect.bottom() - 6.0),
+            ),
+            if is_de {
+                "ITU-R BS.1770-4 · Einheitliche Lautstärke ohne Clipping"
+            } else {
+                "ITU-R BS.1770-4 · Consistent loudness without clipping"
+            },
+            font_regular(11.0),
+            TEXT_SECONDARY,
+            Align2::LEFT_CENTER,
+        );
+
+        let toggle_rect = Rect::from_min_size(
+            Pos2::new(rect.right() - 54.0, rect.center().y - 11.0),
+            Vec2::new(40.0, 22.0),
+        );
+        let mut t_ui = ui.new_child(egui::UiBuilder::new().max_rect(toggle_rect));
+        if glass_toggle(&mut t_ui, &mut config.loudness_normalization).changed() {
+            config.save();
+            action = Some(SettingsAction::LoudnessNormChanged);
+        }
+    });
+
+    scroll.add_space(10.0);
+
+    // Row 7: Discord Rich Presence
+    draw_setting_card(scroll, w, 92.0, |ui, rect| {
+        let p = ui.painter();
+        p.text(
+            Pos2::new(rect.left() + 14.0, rect.top() + 21.0),
+            Align2::LEFT_CENTER,
+            "Discord Rich Presence",
+            font_semibold(13.0),
+            TEXT_PRIMARY,
+        );
+
+        // Sleek monochrome status badge
+        let (badge_text, dot_col, text_col) = match rpc_status {
+            RpcStatus::Connected => (
+                if is_de { "Verbunden" } else { "Connected" },
+                Color32::from_rgb(132, 232, 168),
+                TEXT_PRIMARY,
+            ),
+            RpcStatus::WaitingForDiscord => (
+                if is_de {
+                    "Wartet auf Discord"
+                } else {
+                    "Waiting for Discord"
+                },
+                Color32::from_rgb(218, 198, 128),
+                TEXT_SECONDARY,
+            ),
+            RpcStatus::NeedsClientId => (
+                if is_de {
+                    "App-ID benötigt"
+                } else {
+                    "App ID needed"
+                },
+                Color32::from_rgb(160, 166, 178),
+                TEXT_SECONDARY,
+            ),
+            RpcStatus::Disabled => (
+                if is_de { "Aus" } else { "Off" },
+                TEXT_MUTED,
+                TEXT_MUTED,
+            ),
+        };
+        let badge_galley = p.layout_no_wrap(badge_text.to_string(), font_semibold(10.5), text_col);
+        let badge_w = badge_galley.size().x + 22.0;
+        let badge_rect = Rect::from_min_size(
+            Pos2::new(rect.left() + 168.0, rect.top() + 11.0),
+            Vec2::new(badge_w, 20.0),
+        );
+        p.rect_filled(badge_rect, CornerRadius::same(10), rgba(255, 255, 255, 10));
+        p.rect_stroke(
+            badge_rect,
+            CornerRadius::same(10),
+            Stroke::new(1.0_f32, RIM_SUBTLE),
+            StrokeKind::Inside,
+        );
+        p.circle_filled(
+            Pos2::new(badge_rect.left() + 9.0, badge_rect.center().y),
+            3.0,
+            dot_col,
+        );
+        p.galley(
+            Pos2::new(
+                badge_rect.left() + 16.0,
+                badge_rect.center().y - badge_galley.size().y * 0.5,
+            ),
+            badge_galley,
+            text_col,
+        );
+
+        // Toggle switch
+        let toggle_rect = Rect::from_min_size(
+            Pos2::new(rect.right() - 54.0, rect.top() + 10.0),
+            Vec2::new(40.0, 22.0),
+        );
+        let mut t_ui = ui.new_child(egui::UiBuilder::new().max_rect(toggle_rect));
+        if glass_toggle(&mut t_ui, &mut config.discord_rpc_enabled).changed() {
+            config.save();
+            action = Some(SettingsAction::DiscordRpcChanged);
+        }
+
+        // Compact Discord App-ID input row
+        ui.painter().text(
+            Pos2::new(rect.left() + 14.0, rect.top() + 63.0),
+            Align2::LEFT_CENTER,
+            "Discord App-ID",
+            font_regular(11.5),
+            TEXT_SECONDARY,
+        );
+
+        let input_rect = Rect::from_min_max(
+            Pos2::new(rect.left() + 116.0, rect.top() + 49.0),
+            Pos2::new(rect.right() - 14.0, rect.top() + 77.0),
+        );
+        let mut id_ui = ui.new_child(egui::UiBuilder::new().max_rect(input_rect));
+        let hint = if is_de {
+            "Discord Developer App-ID eingeben…"
+        } else {
+            "Enter Discord Developer App ID…"
+        };
+        let resp = id_ui.add_sized(
+            input_rect.size(),
+            egui::TextEdit::singleline(&mut config.discord_client_id)
+                .font(font_regular(11.5))
+                .hint_text(hint)
+                .margin(egui::Margin::symmetric(8, 5)),
+        );
+        if resp.changed() {
+            config.save();
+            action = Some(SettingsAction::DiscordRpcChanged);
+        }
+    });
+
+    scroll.add_space(4.0);
+        });
 
     action
 }

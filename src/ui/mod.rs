@@ -15,6 +15,7 @@ use crate::audio::engine::AudioEngine;
 use crate::audio::{AudioCommand, AudioTrackSpec, DjSettings, EngineSnapshot};
 use crate::config::{AppConfig, PlaybackMode, RepeatMode};
 use crate::covers::{set_custom_cover, CoverManager};
+use crate::discord_rpc::{DiscordRpcManager, RpcTrackInfo};
 use crate::i18n::tr;
 use crate::library::{
     create_playlist, delete_track, import_audio_files, import_pc_folder_as_playlist, rename_track,
@@ -83,6 +84,7 @@ pub struct RustifyApp {
     covers: CoverManager,
     lyrics_mgr: LyricsManager,
     media_controls: SystemMediaController,
+    discord_rpc: DiscordRpcManager,
 
     play_queue: Vec<PathBuf>,
     queue_pos: usize,
@@ -128,8 +130,13 @@ impl RustifyApp {
         let eff_vol = if config.muted { 0.0 } else { config.volume };
         let engine = AudioEngine::new(eff_vol, dj_settings);
         engine.send(AudioCommand::SetEq(config.eq_bands_db));
+        engine.send(AudioCommand::SetLoudnessNorm(config.loudness_normalization));
         let bpm = BpmManager::new();
         let media_controls = SystemMediaController::new(hwnd);
+        let discord_rpc = DiscordRpcManager::new(
+            config.discord_rpc_enabled,
+            config.discord_client_id.clone(),
+        );
 
         let backdrop = cc.gl.as_ref().map(|gl| LiquidBackdrop::new(gl));
         let logo_tex = load_logo_texture(&cc.egui_ctx);
@@ -147,6 +154,7 @@ impl RustifyApp {
             covers: CoverManager::new(),
             lyrics_mgr: LyricsManager::new(),
             media_controls,
+            discord_rpc,
             play_queue: Vec::new(),
             queue_pos: 0,
             user_queue: VecDeque::new(),
@@ -696,6 +704,16 @@ impl RustifyApp {
             self.snap.position_sec,
             self.snap.is_playing,
         );
+
+        let rpc_info = meta_owned.map(|(title, artist, playlist, _)| RpcTrackInfo {
+            title,
+            artist,
+            playlist,
+            position_sec: self.snap.position_sec,
+            duration_sec: dur,
+            is_playing: self.snap.is_playing,
+        });
+        self.discord_rpc.update_track(rpc_info);
     }
 
     fn handle_keyboard_shortcuts(&mut self, ctx: &Context) {
@@ -2089,6 +2107,7 @@ impl eframe::App for RustifyApp {
                     screen,
                     &mut self.settings_open,
                     &mut self.config,
+                    self.discord_rpc.status(),
                 ) {
                     let s = tr(self.config.language);
                     match set_act {
@@ -2107,6 +2126,17 @@ impl eframe::App for RustifyApp {
                         }
                         SettingsAction::EqChanged => {
                             self.engine.send(AudioCommand::SetEq(self.config.eq_bands_db));
+                        }
+                        SettingsAction::LoudnessNormChanged => {
+                            self.engine.send(AudioCommand::SetLoudnessNorm(
+                                self.config.loudness_normalization,
+                            ));
+                        }
+                        SettingsAction::DiscordRpcChanged => {
+                            self.discord_rpc.configure(
+                                self.config.discord_rpc_enabled,
+                                self.config.discord_client_id.clone(),
+                            );
                         }
                         SettingsAction::ReanalyzeAllBpm => {
                             let all_paths: Vec<PathBuf> = self
@@ -2148,6 +2178,7 @@ impl eframe::App for RustifyApp {
     }
 
     fn on_exit(&mut self, gl: Option<&egui_glow::glow::Context>) {
+        self.discord_rpc.shutdown();
         self.bpm.save_cache();
         if self.capture_path.is_none() {
             self.config.save();

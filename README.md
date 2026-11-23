@@ -39,10 +39,15 @@
 - **Harmonic Key Detection (Camelot Wheel `1A–12B`)**: computes a 12-bin chromagram against Krumhansl-Kessler profiles to chain harmonically compatible tracks smoothly in `DJ-Mix` mode.
 - **Beat-Grid Phase-Locked Transitions**: dual-deck mixer with continuous Beat-Grid Phase-Locked Loop (PLL), club-style 220 Hz Linkwitz-Riley Bass-Swap EQ crossover, constant-energy gain curves, and automatic silence/intro cueing.
 
-### Real-Time 5-Band Equalizer & Bass Control
+### Real-Time 5-Band Equalizer & Loudness Normalization (-14 LUFS / ITU-R BS.1770)
+- **Loudness Normalization (-14 LUFS / ITU-R BS.1770)**: measures integrated track loudness via a 2-stage K-weighting biquad cascade with dual-gated 400 ms blocks and smoothly applies peak-safe makeup gain per deck so every song and DJ transition stays at consistent volume without clipping (toggleable anytime in **Settings**).
 - Live stereo RBJ Biquad equalizer right in **Settings**:
   - **60 Hz** (Sub-Bass), **230 Hz** (Bass), **910 Hz** (Mids), **3.6 kHz** (Presence), **14 kHz** (Treble) from `-12 dB` to `+12 dB`.
   - Built-in presets: *Flat*, *Bass Boost*, *Hardstyle*, *Vocals*, *Pop / Rock*, and *Custom*.
+
+### Discord Rich Presence
+- Native pure-Rust Discord IPC integration (`ActivityType::Listening`) displaying the current track title, artist, playlist, and a live progress bar right on your Discord profile.
+- Automatically reconnects if Discord starts later, clears presence cleanly on pause/exit, and can be toggled with your Discord Application ID directly in **Settings**.
 
 ### Synchronized Lyrics (LRCLIB)
 - Click the microphone icon in the player bar to open the Liquid Glass karaoke lyrics view.

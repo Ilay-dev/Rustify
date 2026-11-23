@@ -15,7 +15,7 @@ use std::sync::{
 use std::thread;
 use std::time::UNIX_EPOCH;
 
-const CACHE_VERSION: u32 = 9;
+const CACHE_VERSION: u32 = 10;
 
 const MEL_ONNX_BYTES: &[u8] = include_bytes!("../../models/mel_spectrogram.onnx");
 const BEAT_ONNX_BYTES: &[u8] = include_bytes!("../../models/beat_this_small.onnx");
@@ -113,10 +113,13 @@ fn analyze_mono_pcm(
             camelot_key: String::new(),
             camelot_num: 0,
             camelot_major: false,
+            lufs: -14.0,
+            norm_gain: 1.0,
         };
     }
 
     let (camelot_key, camelot_num, camelot_major) = detect_camelot_key(mono, sr);
+    let (lufs, norm_gain) = measure_lufs_and_norm_gain(mono, sr);
 
     // 1. Compute 50ms RMS energy envelope + 500ms smoothed contour for structural phrase cue detection
     let block_len = ((sr as f32 * 0.05) as usize).max(256);
@@ -253,6 +256,8 @@ fn analyze_mono_pcm(
                         camelot_key,
                         camelot_num,
                         camelot_major,
+                        lufs,
+                        norm_gain,
                     };
                 }
             }
@@ -289,6 +294,8 @@ fn analyze_mono_pcm(
             camelot_key,
             camelot_num,
             camelot_major,
+            lufs,
+            norm_gain,
         };
     }
 
@@ -373,6 +380,8 @@ fn analyze_mono_pcm(
             camelot_key,
             camelot_num,
             camelot_major,
+            lufs,
+            norm_gain,
         };
     }
 
@@ -540,7 +549,135 @@ fn analyze_mono_pcm(
         camelot_key,
         camelot_num,
         camelot_major,
+        lufs,
+        norm_gain,
     }
+}
+
+/// Measures integrated loudness (LUFS) per ITU-R BS.1770-4 using a 2-stage K-weighting biquad
+/// cascade and dual-gated 400 ms blocks (100 ms hop / 75% overlap), then computes a peak-safe
+/// linear makeup gain targeting -14.0 LUFS without clipping.
+fn measure_lufs_and_norm_gain(mono: &[f32], sr: u32) -> (f32, f32) {
+    if sr == 0 || mono.is_empty() {
+        return (-14.0, 1.0);
+    }
+
+    let fs = (sr as f64).max(8000.0);
+
+    // Stage 1: RBJ High-Shelf +4.0 dB at 1500.0 Hz, Q = 0.7071
+    let (s1_b0, s1_b1, s1_b2, s1_a1, s1_a2) = {
+        let f0 = 1500.0_f64.min(fs * 0.45);
+        let q = 0.7071_f64;
+        let a = 10.0_f64.powf(4.0 / 40.0);
+        let w0 = 2.0 * std::f64::consts::PI * f0 / fs;
+        let cos_w0 = w0.cos();
+        let sin_w0 = w0.sin();
+        let alpha = sin_w0 / (2.0 * q);
+        let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
+
+        let b0 = a * ((a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha);
+        let b1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w0);
+        let b2 = a * ((a + 1.0) + (a - 1.0) * cos_w0 - two_sqrt_a_alpha);
+        let a0 = (a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha;
+        let a1 = 2.0 * ((a - 1.0) - (a + 1.0) * cos_w0);
+        let a2 = (a + 1.0) - (a - 1.0) * cos_w0 - two_sqrt_a_alpha;
+        (b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0)
+    };
+
+    // Stage 2: RBJ High-Pass at 38.135 Hz, Q = 0.5003
+    let (s2_b0, s2_b1, s2_b2, s2_a1, s2_a2) = {
+        let f0 = 38.135_f64.min(fs * 0.45);
+        let q = 0.5003_f64;
+        let w0 = 2.0 * std::f64::consts::PI * f0 / fs;
+        let cos_w0 = w0.cos();
+        let sin_w0 = w0.sin();
+        let alpha = sin_w0 / (2.0 * q);
+
+        let b0 = (1.0 + cos_w0) * 0.5;
+        let b1 = -(1.0 + cos_w0);
+        let b2 = (1.0 + cos_w0) * 0.5;
+        let a0 = 1.0 + alpha;
+        let a1 = -2.0 * cos_w0;
+        let a2 = 1.0 - alpha;
+        (b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0)
+    };
+
+    let mut s1_z1 = 0.0_f64;
+    let mut s1_z2 = 0.0_f64;
+    let mut s2_z1 = 0.0_f64;
+    let mut s2_z2 = 0.0_f64;
+
+    let mut prefix_sq = Vec::with_capacity(mono.len() + 1);
+    prefix_sq.push(0.0_f64);
+    let mut acc = 0.0_f64;
+
+    for &sample in mono {
+        let x = sample as f64;
+        let y1 = s1_b0 * x + s1_z1;
+        s1_z1 = s1_b1 * x - s1_a1 * y1 + s1_z2;
+        s1_z2 = s1_b2 * x - s1_a2 * y1;
+
+        let y2 = s2_b0 * y1 + s2_z1;
+        s2_z1 = s2_b1 * y1 - s2_a1 * y2 + s2_z2;
+        s2_z2 = s2_b2 * y1 - s2_a2 * y2;
+
+        acc += y2 * y2;
+        prefix_sq.push(acc);
+    }
+
+    // 400 ms blocks with 100 ms hop (75% overlap): z_j = mean(y^2)
+    let block_len = ((fs * 0.400).round() as usize).max(1);
+    let hop_len = ((fs * 0.100).round() as usize).max(1);
+
+    let mut blocks = Vec::new();
+    if mono.len() >= block_len {
+        let inv_block = 1.0 / block_len as f64;
+        let mut start = 0usize;
+        while start + block_len <= mono.len() {
+            let z_j = (prefix_sq[start + block_len] - prefix_sq[start]) * inv_block;
+            blocks.push(z_j);
+            start += hop_len;
+        }
+    } else {
+        blocks.push(acc / mono.len() as f64);
+    }
+
+    // Absolute gate: -70.0 LUFS
+    let abs_gated: Vec<f64> = blocks
+        .into_iter()
+        .filter(|&z| -0.691 + 10.0 * z.max(1e-12).log10() > -70.0)
+        .collect();
+    if abs_gated.is_empty() {
+        return (-14.0, 1.0);
+    }
+
+    // Relative gate: -10.0 LUFS below absolute-gated mean
+    let z_abs_mean = abs_gated.iter().sum::<f64>() / abs_gated.len() as f64;
+    let rel_thresh_lufs = (-0.691 + 10.0 * z_abs_mean.max(1e-12).log10()) - 10.0;
+
+    let mut rel_sum = 0.0_f64;
+    let mut rel_count = 0usize;
+    for &z in &abs_gated {
+        if -0.691 + 10.0 * z.max(1e-12).log10() > rel_thresh_lufs {
+            rel_sum += z;
+            rel_count += 1;
+        }
+    }
+    let z_final = if rel_count > 0 {
+        rel_sum / rel_count as f64
+    } else {
+        z_abs_mean
+    };
+
+    let lufs = (-0.691 + 10.0 * z_final.max(1e-12).log10()).clamp(-45.0, -2.0) as f32;
+    let peak = mono
+        .iter()
+        .map(|s| s.abs())
+        .fold(0.0f32, f32::max)
+        .max(0.05);
+    let raw_gain = 10.0f32.powf((-14.0 - lufs) / 20.0);
+    let norm_gain = raw_gain.clamp(0.35, 2.2).min((0.96 / peak).max(0.35));
+    (lufs, norm_gain)
 }
 
 /// Detects the musical key of mono PCM audio using a 4096-point STFT Pitch Class Profile
@@ -981,6 +1118,8 @@ mod tests {
                 camelot_key: String::new(),
                 camelot_num: 0,
                 camelot_major: false,
+                lufs: -14.0,
+                norm_gain: 1.0,
             })
         };
         let order = build_dj_sorted_indices(&[fake(174.0, 0.8), fake(128.0, 0.6), fake(150.0, 0.9)]);

@@ -40,10 +40,24 @@ pub struct TrackAnalysis {
     /// True for Major ('B'), false for Minor ('A').
     #[serde(default)]
     pub camelot_major: bool,
+    /// ITU-R BS.1770-4 integrated loudness in LUFS (e.g. -14.0).
+    #[serde(default = "default_lufs")]
+    pub lufs: f32,
+    /// Peak-safe linear makeup gain to reach -14.0 LUFS target.
+    #[serde(default = "default_norm_gain")]
+    pub norm_gain: f32,
 }
 
 fn default_intro_boost() -> f32 {
     1.15
+}
+
+fn default_lufs() -> f32 {
+    -14.0
+}
+
+fn default_norm_gain() -> f32 {
+    1.0
 }
 
 impl TrackAnalysis {
@@ -312,6 +326,7 @@ pub enum AudioCommand {
     Seek(f32),
     SetVolume(f32),
     SetEq([f32; 5]),
+    SetLoudnessNorm(bool),
     SetDjSettings(DjSettings),
     Stop,
 }

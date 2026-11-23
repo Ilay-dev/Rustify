@@ -280,16 +280,45 @@ struct Deck {
     audio: Arc<DecodedAudio>,
     pos_frames: f64,
     crossover: StereoCrossover,
+    smooth_norm_gain: f32,
 }
 
 impl Deck {
-    fn new(spec: AudioTrackSpec, audio: Arc<DecodedAudio>, sr: f32, start_sec: f64) -> Self {
+    fn new(
+        spec: AudioTrackSpec,
+        audio: Arc<DecodedAudio>,
+        sr: f32,
+        start_sec: f64,
+        loudness_norm: bool,
+    ) -> Self {
         let pos_frames = (start_sec * sr as f64).clamp(0.0, audio.total_frames as f64);
+        let initial_gain = if loudness_norm {
+            spec.analysis
+                .as_ref()
+                .map(|a| a.norm_gain.clamp(0.35, 2.2))
+                .unwrap_or(1.0)
+        } else {
+            1.0
+        };
         Self {
             spec,
             audio,
             pos_frames,
             crossover: StereoCrossover::new(sr, 220.0),
+            smooth_norm_gain: initial_gain,
+        }
+    }
+
+    #[inline]
+    fn target_norm_gain(&self, loudness_norm: bool) -> f32 {
+        if loudness_norm {
+            self.spec
+                .analysis
+                .as_ref()
+                .map(|a| a.norm_gain.clamp(0.35, 2.2))
+                .unwrap_or(1.0)
+        } else {
+            1.0
         }
     }
 
@@ -320,6 +349,7 @@ struct MixerState {
     planned_mix: Option<CrossfadePlan>,
     mode: PlaybackMode,
     dj_settings: DjSettings,
+    loudness_norm: bool,
 
     is_playing: bool,
     is_loading: bool,
@@ -352,6 +382,7 @@ impl MixerState {
             planned_mix: None,
             mode: PlaybackMode::Normal,
             dj_settings: DjSettings::default(),
+            loudness_norm: true,
             is_playing: false,
             is_loading: false,
             target_volume: 0.78,
@@ -449,7 +480,13 @@ impl MixerState {
                 .unwrap_or(0.0);
 
             a.crossover.reset();
-            let deck_b = Deck::new(next_spec, next_audio, sr, plan.incoming_start_sec);
+            let deck_b = Deck::new(
+                next_spec,
+                next_audio,
+                sr,
+                plan.incoming_start_sec,
+                self.loudness_norm,
+            );
             self.deck_b = Some(deck_b);
             self.transition = Some(ActiveTransition {
                 plan,
@@ -460,7 +497,13 @@ impl MixerState {
             self.planned_mix = None;
             self.is_playing = true;
         } else {
-            self.deck_a = Some(Deck::new(next_spec, next_audio, sr, 0.0));
+            self.deck_a = Some(Deck::new(
+                next_spec,
+                next_audio,
+                sr,
+                0.0,
+                self.loudness_norm,
+            ));
             self.deck_b = None;
             self.transition = None;
             self.is_playing = true;
@@ -471,8 +514,11 @@ impl MixerState {
     fn render_stereo(&mut self, out: &mut [(f32, f32)]) {
         let sr = self.sample_rate as f64;
         let inv_sr = 1.0 / sr;
-        // 12ms smooth ramp coeff
+        // 12ms smooth ramp coeff for master volume / play gate
         let ramp_coeff = (1.0 / (0.012 * sr as f32)).min(0.05);
+        // 250ms smooth ramp coeff for per-deck LUFS loudness normalization gain
+        let norm_ramp = (1.0 / (0.250 * sr as f32)).min(0.05);
+        let loudness_norm = self.loudness_norm;
 
         for slot in out.iter_mut() {
             // Smooth master volume & play/pause gate
@@ -524,6 +570,7 @@ impl MixerState {
                                 next_audio,
                                 self.sample_rate as f32,
                                 plan.incoming_start_sec,
+                                loudness_norm,
                             );
                             if let Some(ref mut da) = self.deck_a {
                                 da.crossover.reset();
@@ -581,17 +628,21 @@ impl MixerState {
                 }
 
                 let (la, ra_s) = if let Some(ref mut da) = self.deck_a {
-                    let sample = da.audio.sample_cubic(da.pos_frames);
+                    let target_g = da.target_norm_gain(loudness_norm);
+                    da.smooth_norm_gain += (target_g - da.smooth_norm_gain) * norm_ramp;
+                    let (sl, sr_s) = da.audio.sample_cubic(da.pos_frames);
                     da.pos_frames += rate_a;
-                    sample
+                    (sl * da.smooth_norm_gain, sr_s * da.smooth_norm_gain)
                 } else {
                     (0.0, 0.0)
                 };
 
                 let (lb_raw, rb_raw) = if let Some(ref mut db) = self.deck_b {
-                    let sample = db.audio.sample_cubic(db.pos_frames);
+                    let target_g = db.target_norm_gain(loudness_norm);
+                    db.smooth_norm_gain += (target_g - db.smooth_norm_gain) * norm_ramp;
+                    let (sl, sr_s) = db.audio.sample_cubic(db.pos_frames);
                     db.pos_frames += rate_b;
-                    sample
+                    (sl * db.smooth_norm_gain, sr_s * db.smooth_norm_gain)
                 } else {
                     (0.0, 0.0)
                 };
@@ -661,7 +712,10 @@ impl MixerState {
 
                 (out_l, out_r)
             } else if let Some(ref mut da) = self.deck_a {
-                let sample = da.audio.sample_cubic(da.pos_frames);
+                let target_g = da.target_norm_gain(loudness_norm);
+                da.smooth_norm_gain += (target_g - da.smooth_norm_gain) * norm_ramp;
+                let (sl, sr_s) = da.audio.sample_cubic(da.pos_frames);
+                let sample = (sl * da.smooth_norm_gain, sr_s * da.smooth_norm_gain);
                 da.pos_frames += 1.0;
 
                 if da.is_finished() {
@@ -677,6 +731,7 @@ impl MixerState {
                             next_audio,
                             self.sample_rate as f32,
                             start,
+                            loudness_norm,
                         ));
                         self.transitioned_to_next_counter += 1;
                     } else {
@@ -894,11 +949,13 @@ impl AudioEngine {
                                     if st.generation != generation {
                                         continue;
                                     }
+                                    let norm = st.loudness_norm;
                                     st.deck_a = Some(Deck::new(
                                         track,
                                         audio,
                                         st.sample_rate as f32,
                                         0.0,
+                                        norm,
                                     ));
                                     st.deck_b = None;
                                     st.transition = None;
@@ -1083,6 +1140,12 @@ impl AudioEngine {
                         changed = true;
                     }
                 }
+                if let Some(ref mut db) = st.deck_b {
+                    if db.spec.path == path {
+                        db.spec.analysis = Some(analysis.clone());
+                        changed = true;
+                    }
+                }
                 if let Some((ref mut pre, _)) = st.preloaded_next {
                     if pre.path == path {
                         pre.analysis = Some(analysis);
@@ -1125,6 +1188,9 @@ impl AudioEngine {
             }
             AudioCommand::SetEq(bands) => {
                 self.state.lock().eq.set_bands_db(bands);
+            }
+            AudioCommand::SetLoudnessNorm(enabled) => {
+                self.state.lock().loudness_norm = enabled;
             }
             AudioCommand::SetDjSettings(settings) => {
                 let mut st = self.state.lock();
