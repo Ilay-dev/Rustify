@@ -5,7 +5,8 @@ use crate::library::{format_mm_ss, Track};
 use crate::ui::icons::{draw_icon, Icon};
 use crate::ui::theme::{
     draw_liquid_glass_panel, draw_truncated_text, font_regular, font_semibold, glass_icon_button,
-    glass_slider, GlassLevel, RIM_SUBTLE, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
+    glass_seek_slider, glass_slider, GlassLevel, RIM_SUBTLE, TEXT_MUTED, TEXT_PRIMARY,
+    TEXT_SECONDARY,
 };
 use egui::{Align2, Color32, CornerRadius, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2};
 
@@ -289,11 +290,27 @@ pub fn show_player_bar(
 
         let seek_y = center_rect.bottom() - 9.0;
         let time_w = 36.0;
+        let slider_rect = Rect::from_min_max(
+            Pos2::new(center_rect.left() + time_w + 4.0, seek_y - 9.0),
+            Pos2::new(center_rect.right() - time_w - 4.0, seek_y + 9.0),
+        );
+        let mut s_ui = ui.new_child(egui::UiBuilder::new().max_rect(slider_rect));
+        let fmt = |f: f32| format_mm_ss(f * dur);
+        let (seeked, shown_frac) = glass_seek_slider(
+            &mut s_ui,
+            "main_seek_slider",
+            slider_rect.width(),
+            18.0,
+            frac,
+            mix_frac,
+            if dur > 0.5 { Some(&fmt) } else { None },
+        );
+        let shown_pos = (shown_frac * dur).clamp(0.0, dur.max(0.0));
         let p = ui.painter();
         p.text(
             Pos2::new(center_rect.left() + time_w - 4.0, seek_y),
             Align2::RIGHT_CENTER,
-            format_mm_ss(pos),
+            format_mm_ss(shown_pos),
             font_regular(11.0),
             TEXT_SECONDARY,
         );
@@ -303,22 +320,6 @@ pub fn show_player_bar(
             format_mm_ss(dur),
             font_regular(11.0),
             TEXT_MUTED,
-        );
-
-        let slider_rect = Rect::from_min_max(
-            Pos2::new(center_rect.left() + time_w + 4.0, seek_y - 9.0),
-            Pos2::new(center_rect.right() - time_w - 4.0, seek_y + 9.0),
-        );
-        let mut s_ui = ui.new_child(egui::UiBuilder::new().max_rect(slider_rect));
-        let fmt = |f: f32| format_mm_ss(f * dur);
-        let (seeked, _) = glass_slider(
-            &mut s_ui,
-            "main_seek_slider",
-            slider_rect.width(),
-            18.0,
-            frac,
-            mix_frac,
-            if dur > 0.5 { Some(&fmt) } else { None },
         );
         if let Some(new_frac) = seeked {
             if dur > 0.5 {

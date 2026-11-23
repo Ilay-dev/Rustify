@@ -567,6 +567,183 @@ pub fn glass_slider(
     (new_val, resp.on_hover_cursor(egui::CursorIcon::PointingHand))
 }
 
+/// Sleek Liquid Glass interactive horizontal seek slider that tracks the pointer
+/// visually while dragging without interrupting playback, and only commits the
+/// seek position (`Some(target_frac)`) when the mouse button is released.
+pub fn glass_seek_slider(
+    ui: &mut Ui,
+    id_salt: &str,
+    width: f32,
+    height: f32,
+    value: f32,
+    mix_marker_frac: Option<f32>,
+    hover_formatter: Option<&dyn Fn(f32) -> String>,
+) -> (Option<f32>, f32) {
+    let (rect, resp) =
+        ui.allocate_exact_size(Vec2::new(width.max(40.0), height), Sense::click_and_drag());
+    let base_id = ui.make_persistent_id(id_salt);
+    let scrub_id = base_id.with("scrub_frac");
+    let hold_id = base_id.with("hold_frac");
+    let now = ui.input(|i| i.time);
+
+    let pointer_frac = resp
+        .interact_pointer_pos()
+        .or_else(|| ui.input(|i| i.pointer.hover_pos()))
+        .map(|pos| ((pos.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0));
+
+    let is_scrubbing = resp.dragged() || resp.is_pointer_button_down_on();
+    let mut committed_val = None;
+
+    if is_scrubbing {
+        if let Some(f) = pointer_frac {
+            ui.ctx().data_mut(|d| d.insert_temp(scrub_id, f));
+        }
+    }
+
+    if resp.drag_stopped() || resp.clicked() {
+        let final_frac = pointer_frac
+            .or_else(|| ui.ctx().data_mut(|d| d.get_temp::<f32>(scrub_id)))
+            .unwrap_or(value)
+            .clamp(0.0, 1.0);
+        ui.ctx().data_mut(|d| {
+            d.remove::<f32>(scrub_id);
+            d.insert_temp(hold_id, (final_frac, now));
+        });
+        committed_val = Some(final_frac);
+    }
+
+    let shown_val = if is_scrubbing {
+        pointer_frac
+            .or_else(|| ui.ctx().data_mut(|d| d.get_temp::<f32>(scrub_id)))
+            .unwrap_or(value)
+            .clamp(0.0, 1.0)
+    } else if let Some(c) = committed_val {
+        c
+    } else if let Some((held_f, held_at)) =
+        ui.ctx().data_mut(|d| d.get_temp::<(f32, f64)>(hold_id))
+    {
+        if (now - held_at) < 0.16 && (value - held_f).abs() > 0.015 {
+            held_f
+        } else {
+            ui.ctx().data_mut(|d| d.remove::<(f32, f64)>(hold_id));
+            value.clamp(0.0, 1.0)
+        }
+    } else {
+        value.clamp(0.0, 1.0)
+    };
+
+    let hover = ui.ctx().animate_bool_with_time(
+        base_id,
+        resp.hovered() || is_scrubbing,
+        0.14,
+    );
+
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        let cy = rect.center().y;
+        let track_h = 3.5 + hover * 1.5;
+        let track_rect = Rect::from_min_max(
+            Pos2::new(rect.left(), cy - track_h * 0.5),
+            Pos2::new(rect.right(), cy + track_h * 0.5),
+        );
+        let cr = CornerRadius::same((track_h * 0.5).ceil() as u8);
+
+        p.rect_filled(
+            track_rect,
+            cr,
+            Color32::from_rgba_unmultiplied(255, 255, 255, 26),
+        );
+
+        if let Some(mf) = mix_marker_frac {
+            let mf = mf.clamp(0.05, 0.98);
+            let mx = rect.left() + rect.width() * mf;
+            let mix_rect = Rect::from_min_max(
+                Pos2::new(mx, track_rect.top()),
+                Pos2::new(rect.right(), track_rect.bottom()),
+            );
+            p.rect_filled(
+                mix_rect,
+                cr,
+                Color32::from_rgba_unmultiplied(210, 218, 232, 34),
+            );
+            p.line_segment(
+                [Pos2::new(mx, cy - 5.0), Pos2::new(mx, cy + 5.0)],
+                Stroke::new(1.2_f32, Color32::from_rgba_unmultiplied(235, 238, 245, 110)),
+            );
+        }
+
+        let fill_x = rect.left() + rect.width() * shown_val;
+        let fill_rect = Rect::from_min_max(
+            track_rect.left_top(),
+            Pos2::new(fill_x.max(track_rect.left()), track_rect.bottom()),
+        );
+        let fill_col = lerp_color(
+            Color32::from_rgb(206, 210, 220),
+            Color32::from_rgb(248, 250, 255),
+            hover,
+        );
+        p.rect_filled(fill_rect, cr, fill_col);
+
+        let knob_r = 3.5 + hover * 3.0;
+        if hover > 0.02 || is_scrubbing {
+            p.circle_filled(
+                Pos2::new(fill_x, cy),
+                knob_r + 3.0,
+                Color32::from_rgba_unmultiplied(255, 255, 255, (hover * 34.0) as u8),
+            );
+            p.circle_filled(Pos2::new(fill_x, cy), knob_r, Color32::WHITE);
+        } else {
+            p.circle_filled(Pos2::new(fill_x, cy), 3.0, Color32::from_rgb(230, 234, 242));
+        }
+
+        if (resp.hovered() || is_scrubbing) && hover_formatter.is_some() {
+            let tip_frac = if is_scrubbing {
+                Some(shown_val)
+            } else {
+                pointer_frac
+            };
+            if let (Some(fmt), Some(f)) = (hover_formatter, tip_frac) {
+                let text = fmt(f);
+                let tx = rect.left() + rect.width() * f;
+                let galley = p.layout_no_wrap(text, font_regular(11.0), TEXT_PRIMARY);
+                let tip_size = galley.size() + Vec2::new(12.0, 6.0);
+                let tip_rect = Rect::from_center_size(
+                    Pos2::new(
+                        tx.clamp(
+                            rect.left() + tip_size.x * 0.5,
+                            rect.right() - tip_size.x * 0.5,
+                        ),
+                        cy - 18.0,
+                    ),
+                    tip_size,
+                );
+                p.rect_filled(
+                    tip_rect,
+                    CornerRadius::same(6),
+                    Color32::from_rgba_premultiplied(20, 22, 27, 235),
+                );
+                p.rect_stroke(
+                    tip_rect,
+                    CornerRadius::same(6),
+                    Stroke::new(1.0_f32, RIM_BRIGHT),
+                    StrokeKind::Inside,
+                );
+                p.galley(
+                    Pos2::new(
+                        tip_rect.center().x - galley.size().x * 0.5,
+                        tip_rect.center().y - galley.size().y * 0.5,
+                    ),
+                    galley,
+                    TEXT_PRIMARY,
+                );
+            }
+        }
+    }
+
+    let _ = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    (committed_val, shown_val)
+}
+
 /// Minimalist Liquid Glass toggle switch for Settings & Setup.
 pub fn glass_toggle(ui: &mut Ui, checked: &mut bool) -> Response {
     let size = Vec2::new(40.0, 22.0);
