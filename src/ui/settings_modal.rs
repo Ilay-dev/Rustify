@@ -1,13 +1,14 @@
 use crate::config::{AppConfig, EqPreset};
-use crate::discord_rpc::RpcStatus;
+use crate::discord_rpc::{RpcStatus, DEFAULT_DISCORD_CLIENT_ID};
 use crate::i18n::{tr, Language};
 use crate::ui::icons::Icon;
 use crate::ui::theme::{
-    draw_liquid_glass_panel, draw_truncated_text, font_regular, font_semibold, glass_icon_button,
-    glass_pill_button, glass_slider, glass_toggle, rgba, GlassLevel, FROST_CTA_IDLE,
-    FROST_CTA_TEXT, GLASS_PILL_IDLE, RIM_BRIGHT, RIM_SUBTLE, TEXT_MUTED, TEXT_PRIMARY,
-    TEXT_SECONDARY,
+    draw_liquid_glass_panel, draw_truncated_text, font_regular, font_semibold, frosted_cta_button,
+    glass_icon_button, glass_pill_button, glass_slider, glass_toggle, rgba, GlassLevel,
+    FROST_CTA_IDLE, FROST_CTA_TEXT, GLASS_PILL_IDLE, RIM_BRIGHT, RIM_SUBTLE, TEXT_MUTED,
+    TEXT_PRIMARY, TEXT_SECONDARY,
 };
+use crate::updater::{UpdateStatus, CURRENT_VERSION};
 use egui::{Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
 
 pub enum SettingsAction {
@@ -17,6 +18,8 @@ pub enum SettingsAction {
     LoudnessNormChanged,
     DiscordRpcChanged,
     ReanalyzeAllBpm,
+    CheckForUpdates,
+    StartUpdate,
 }
 
 pub fn show_settings_modal(
@@ -25,6 +28,7 @@ pub fn show_settings_modal(
     open: &mut bool,
     config: &mut AppConfig,
     rpc_status: RpcStatus,
+    update_status: &UpdateStatus,
 ) -> Option<SettingsAction> {
     if !*open {
         return None;
@@ -548,15 +552,6 @@ pub fn show_settings_modal(
                 Color32::from_rgb(218, 198, 128),
                 TEXT_SECONDARY,
             ),
-            RpcStatus::NeedsClientId => (
-                if is_de {
-                    "App-ID benötigt"
-                } else {
-                    "App ID needed"
-                },
-                Color32::from_rgb(160, 166, 178),
-                TEXT_SECONDARY,
-            ),
             RpcStatus::Disabled => (
                 if is_de { "Aus" } else { "Off" },
                 TEXT_MUTED,
@@ -605,20 +600,20 @@ pub fn show_settings_modal(
         ui.painter().text(
             Pos2::new(rect.left() + 14.0, rect.top() + 63.0),
             Align2::LEFT_CENTER,
-            "Discord App-ID",
+            "App-ID (Optional)",
             font_regular(11.5),
             TEXT_SECONDARY,
         );
 
         let input_rect = Rect::from_min_max(
-            Pos2::new(rect.left() + 116.0, rect.top() + 49.0),
+            Pos2::new(rect.left() + 124.0, rect.top() + 49.0),
             Pos2::new(rect.right() - 14.0, rect.top() + 77.0),
         );
         let mut id_ui = ui.new_child(egui::UiBuilder::new().max_rect(input_rect));
         let hint = if is_de {
-            "Discord Developer App-ID eingeben…"
+            format!("{DEFAULT_DISCORD_CLIENT_ID} (Standard)")
         } else {
-            "Enter Discord Developer App ID…"
+            format!("{DEFAULT_DISCORD_CLIENT_ID} (Default)")
         };
         let resp = id_ui.add_sized(
             input_rect.size(),
@@ -630,6 +625,222 @@ pub fn show_settings_modal(
         if resp.changed() {
             config.save();
             action = Some(SettingsAction::DiscordRpcChanged);
+        }
+    });
+
+    scroll.add_space(10.0);
+
+    // Row 8: App-Updates (GitHub Releases Auto-Updater)
+    draw_setting_card(scroll, w, 106.0, |ui, rect| {
+        let p = ui.painter();
+
+        // Top row: Title + current version + right-aligned live status badge
+        let title_galley = p.layout_no_wrap(
+            "App-Updates".to_string(),
+            font_semibold(13.0),
+            TEXT_PRIMARY,
+        );
+        let title_w = title_galley.size().x;
+        p.galley(
+            Pos2::new(
+                rect.left() + 14.0,
+                rect.top() + 20.0 - title_galley.size().y * 0.5,
+            ),
+            title_galley,
+            TEXT_PRIMARY,
+        );
+        p.text(
+            Pos2::new(rect.left() + 14.0 + title_w + 8.0, rect.top() + 20.5),
+            Align2::LEFT_CENTER,
+            format!("v{CURRENT_VERSION}"),
+            font_regular(11.0),
+            TEXT_MUTED,
+        );
+
+        let (badge_text, dot_col, text_col): (String, Color32, Color32) = match update_status {
+            UpdateStatus::Idle => (
+                if is_de { "Bereit" } else { "Ready" }.to_string(),
+                TEXT_MUTED,
+                TEXT_MUTED,
+            ),
+            UpdateStatus::Checking => (
+                if is_de { "Prüfe…" } else { "Checking…" }.to_string(),
+                Color32::from_rgb(218, 198, 128),
+                TEXT_SECONDARY,
+            ),
+            UpdateStatus::UpToDate { .. } => (
+                if is_de { "Aktuell" } else { "Up to date" }.to_string(),
+                Color32::from_rgb(132, 232, 168),
+                TEXT_PRIMARY,
+            ),
+            UpdateStatus::Available(info) => (
+                format!("Update: v{}", info.version),
+                Color32::from_rgb(132, 232, 168),
+                TEXT_PRIMARY,
+            ),
+            UpdateStatus::Downloading {
+                downloaded_bytes,
+                total_bytes,
+                ..
+            } => {
+                let pct = if *total_bytes > 0 {
+                    ((*downloaded_bytes as f64 / *total_bytes as f64) * 100.0)
+                        .clamp(0.0, 100.0)
+                        .round() as u32
+                } else {
+                    0
+                };
+                (
+                    if is_de {
+                        format!("Lade… {pct}%")
+                    } else {
+                        format!("Downloading… {pct}%")
+                    },
+                    Color32::from_rgb(218, 198, 128),
+                    TEXT_PRIMARY,
+                )
+            }
+            UpdateStatus::ReadyToInstall => (
+                if is_de {
+                    "Installiere…"
+                } else {
+                    "Installing…"
+                }
+                .to_string(),
+                Color32::from_rgb(132, 232, 168),
+                TEXT_PRIMARY,
+            ),
+            UpdateStatus::Error(_) => (
+                if is_de { "Fehler" } else { "Error" }.to_string(),
+                Color32::from_rgb(235, 120, 120),
+                Color32::from_rgb(235, 150, 150),
+            ),
+        };
+        let badge_galley = p.layout_no_wrap(badge_text, font_semibold(10.5), text_col);
+        let badge_w = badge_galley.size().x + 22.0;
+        let badge_rect = Rect::from_min_size(
+            Pos2::new(rect.right() - 14.0 - badge_w, rect.top() + 10.0),
+            Vec2::new(badge_w, 20.0),
+        );
+        p.rect_filled(badge_rect, CornerRadius::same(10), rgba(255, 255, 255, 10));
+        p.rect_stroke(
+            badge_rect,
+            CornerRadius::same(10),
+            Stroke::new(1.0_f32, RIM_SUBTLE),
+            StrokeKind::Inside,
+        );
+        p.circle_filled(
+            Pos2::new(badge_rect.left() + 9.0, badge_rect.center().y),
+            3.0,
+            dot_col,
+        );
+        p.galley(
+            Pos2::new(
+                badge_rect.left() + 16.0,
+                badge_rect.center().y - badge_galley.size().y * 0.5,
+            ),
+            badge_galley,
+            text_col,
+        );
+
+        // Middle row: Update popup on startup toggle
+        p.text(
+            Pos2::new(rect.left() + 14.0, rect.top() + 49.0),
+            Align2::LEFT_CENTER,
+            if is_de {
+                "Update-Pop-Up beim Start"
+            } else {
+                "Update popup on startup"
+            },
+            font_regular(11.5),
+            TEXT_SECONDARY,
+        );
+        let upd_toggle_rect = Rect::from_min_size(
+            Pos2::new(rect.right() - 54.0, rect.top() + 38.0),
+            Vec2::new(40.0, 22.0),
+        );
+        let mut ut_ui = ui.new_child(egui::UiBuilder::new().max_rect(upd_toggle_rect));
+        if glass_toggle(&mut ut_ui, &mut config.update_popup_enabled).changed() {
+            config.save();
+        }
+
+        // Bottom row: CTA button, progress bar, or check button
+        let bottom_rect = Rect::from_min_max(
+            Pos2::new(rect.left() + 14.0, rect.top() + 68.0),
+            Pos2::new(rect.right() - 14.0, rect.top() + 96.0),
+        );
+        match update_status {
+            UpdateStatus::Available(info) => {
+                let cta_lbl = if is_de {
+                    format!("Jetzt updaten (v{})", info.version)
+                } else {
+                    format!("Update now (v{})", info.version)
+                };
+                let mut b_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(bottom_rect)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                );
+                if frosted_cta_button(&mut b_ui, None, &cta_lbl, 28.0).clicked() {
+                    action = Some(SettingsAction::StartUpdate);
+                }
+            }
+            UpdateStatus::Downloading {
+                downloaded_bytes,
+                total_bytes,
+                ..
+            } => {
+                let frac = if *total_bytes > 0 {
+                    (*downloaded_bytes as f32 / *total_bytes as f32).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let pct = (frac * 100.0).round() as u32;
+                let bar_rect = Rect::from_min_max(
+                    Pos2::new(bottom_rect.left(), bottom_rect.center().y - 4.0),
+                    Pos2::new(bottom_rect.right() - 48.0, bottom_rect.center().y + 4.0),
+                );
+                let p2 = ui.painter();
+                p2.rect_filled(bar_rect, CornerRadius::same(4), rgba(255, 255, 255, 18));
+                if frac > 0.005 {
+                    let fill_rect = Rect::from_min_max(
+                        bar_rect.min,
+                        Pos2::new(
+                            bar_rect.left() + (bar_rect.width() * frac).max(6.0),
+                            bar_rect.bottom(),
+                        ),
+                    );
+                    p2.rect_filled(fill_rect, CornerRadius::same(4), FROST_CTA_IDLE);
+                }
+                p2.text(
+                    Pos2::new(bottom_rect.right(), bottom_rect.center().y),
+                    Align2::RIGHT_CENTER,
+                    format!("{pct}%"),
+                    font_semibold(11.0),
+                    TEXT_PRIMARY,
+                );
+            }
+            _ => {
+                let busy = matches!(
+                    update_status,
+                    UpdateStatus::Checking | UpdateStatus::ReadyToInstall
+                );
+                let lbl = if matches!(update_status, UpdateStatus::Checking) {
+                    if is_de { "Prüfe…" } else { "Checking…" }
+                } else if is_de {
+                    "Nach Updates suchen"
+                } else {
+                    "Check for updates"
+                };
+                let mut b_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(bottom_rect)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                );
+                if glass_pill_button(&mut b_ui, None, lbl, 28.0, false).clicked() && !busy {
+                    action = Some(SettingsAction::CheckForUpdates);
+                }
+            }
         }
     });
 

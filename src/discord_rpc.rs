@@ -7,28 +7,37 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub const DEFAULT_DISCORD_CLIENT_ID: &str = "1574490783363506296";
+
 const RUSTIFY_LARGE_IMAGE_URL: &str =
     "https://raw.githubusercontent.com/Ilay-dev/Rustify/main/assets/rustify_256.png";
-const RUSTIFY_REPO_URL: &str = "https://github.com/Ilay-dev/Rustify";
-const RECONNECT_INTERVAL: Duration = Duration::from_secs(8);
+const RUSTIFY_DOWNLOAD_URL: &str = "https://ilay-dev.github.io/Rustify-Download/";
+const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const SEEK_THRESHOLD_SECS: f32 = 2.5;
+
+fn effective_client_id(custom: &str) -> &str {
+    let t = custom.trim();
+    if t.is_empty() {
+        DEFAULT_DISCORD_CLIENT_ID
+    } else {
+        t
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum RpcStatus {
     Disabled = 0,
-    NeedsClientId = 1,
-    WaitingForDiscord = 2,
-    Connected = 3,
+    WaitingForDiscord = 1,
+    Connected = 2,
 }
 
 impl RpcStatus {
     fn from_u8(v: u8) -> Self {
         match v {
             0 => RpcStatus::Disabled,
-            1 => RpcStatus::NeedsClientId,
-            2 => RpcStatus::WaitingForDiscord,
-            3 => RpcStatus::Connected,
+            1 => RpcStatus::WaitingForDiscord,
+            2 => RpcStatus::Connected,
             _ => RpcStatus::Disabled,
         }
     }
@@ -45,7 +54,7 @@ pub struct RpcTrackInfo {
 }
 
 enum RpcCommand {
-    Configure { enabled: bool, client_id: String },
+    SetConfig { enabled: bool, client_id: String },
     UpdateTrack(Option<RpcTrackInfo>),
     Shutdown,
 }
@@ -62,8 +71,6 @@ impl DiscordRpcManager {
         let trimmed_id = client_id.trim().to_string();
         let initial_status = if !enabled {
             RpcStatus::Disabled
-        } else if trimmed_id.is_empty() {
-            RpcStatus::NeedsClientId
         } else {
             RpcStatus::WaitingForDiscord
         };
@@ -75,7 +82,7 @@ impl DiscordRpcManager {
         let _ = thread::Builder::new()
             .name("rustify-discord-rpc".to_string())
             .spawn(move || {
-                run_rpc_worker(enabled, trimmed_id, rx, status_bg);
+                rpc_worker_loop(enabled, trimmed_id, rx, status_bg);
             });
 
         Self {
@@ -87,7 +94,7 @@ impl DiscordRpcManager {
     }
 
     pub fn configure(&mut self, enabled: bool, client_id: String) {
-        let _ = self.tx.send(RpcCommand::Configure {
+        let _ = self.tx.send(RpcCommand::SetConfig {
             enabled,
             client_id: client_id.trim().to_string(),
         });
@@ -160,40 +167,41 @@ fn clamp_discord_field(input: &str, fallback: &str) -> String {
 
 fn disconnect_client(client: &mut Option<DiscordIpcClient>, activity_set: &mut bool) {
     if let Some(mut c) = client.take() {
-        if *activity_set {
-            let _ = c.clear_activity();
+        if *activity_set && c.clear_activity().is_ok() {
+            let _ = c.recv();
         }
         let _ = c.close();
     }
     *activity_set = false;
 }
 
-fn apply_track_to_client(
+fn push_activity(
     client: &mut DiscordIpcClient,
     track: Option<&RpcTrackInfo>,
+    track_updated_at: Instant,
     activity_set: &mut bool,
 ) -> Result<(), ()> {
     match track {
-        Some(info) if info.is_playing => {
-            let details = clamp_discord_field(&info.title, "Rustify");
-            let state = clamp_discord_field(&info.artist, "Local Music");
-            let large_text = if info.playlist.trim().is_empty() {
+        Some(track) if track.is_playing => {
+            let details = clamp_discord_field(&track.title, "Rustify");
+            let state = clamp_discord_field(&track.artist, "Local Music");
+            let large_text = if track.playlist.trim().is_empty() {
                 "Rustify".to_string()
             } else {
-                clamp_discord_field(&format!("Rustify · {}", info.playlist.trim()), "Rustify")
+                clamp_discord_field(&format!("Rustify · {}", track.playlist.trim()), "Rustify")
             };
 
+            let live_pos = (track.position_sec + track_updated_at.elapsed().as_secs_f32()).max(0.0);
             let now_ms = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as i64;
-            let pos_ms = (info.position_sec.max(0.0) as f64 * 1000.0).round() as i64;
-            let start_ms = now_ms.saturating_sub(pos_ms);
+            let start_ms = now_ms.saturating_sub((live_pos * 1000.0).round() as i64);
 
             let mut timestamps = activity::Timestamps::new().start(start_ms);
-            if info.duration_sec > 1.0 {
-                let dur_ms = (info.duration_sec as f64 * 1000.0).round() as i64;
-                timestamps = timestamps.end(start_ms.saturating_add(dur_ms));
+            if track.duration_sec > 1.0 {
+                let end_ms = start_ms.saturating_add((track.duration_sec * 1000.0).round() as i64);
+                timestamps = timestamps.end(end_ms);
             }
 
             let assets = activity::Assets::new()
@@ -202,19 +210,25 @@ fn apply_track_to_client(
 
             let payload = activity::Activity::new()
                 .activity_type(activity::ActivityType::Listening)
+                .status_display_type(activity::StatusDisplayType::Name)
                 .details(&details)
                 .state(&state)
                 .timestamps(timestamps)
                 .assets(assets)
-                .buttons(vec![activity::Button::new("Get Rustify", RUSTIFY_REPO_URL)]);
+                .buttons(vec![activity::Button::new("Get Rustify", RUSTIFY_DOWNLOAD_URL)]);
 
             client.set_activity(payload).map_err(|_| ())?;
+            let (_op, resp) = client.recv().map_err(|_| ())?;
+            if resp.get("evt").and_then(|v| v.as_str()) == Some("ERROR") {
+                return Err(());
+            }
             *activity_set = true;
             Ok(())
         }
         _ => {
             if *activity_set {
                 client.clear_activity().map_err(|_| ())?;
+                let _ = client.recv();
                 *activity_set = false;
             }
             Ok(())
@@ -226,15 +240,16 @@ fn try_connect(
     client_id: &str,
     client: &mut Option<DiscordIpcClient>,
     current_track: Option<&RpcTrackInfo>,
+    track_updated_at: Instant,
     activity_set: &mut bool,
     status: &AtomicU8,
     last_attempt: &mut Option<Instant>,
 ) {
     *last_attempt = Some(Instant::now());
-    let mut ipc = DiscordIpcClient::new(client_id);
+    let mut ipc = DiscordIpcClient::new(effective_client_id(client_id));
     if ipc.connect().is_ok() {
         *activity_set = false;
-        if apply_track_to_client(&mut ipc, current_track, activity_set).is_ok() {
+        if push_activity(&mut ipc, current_track, track_updated_at, activity_set).is_ok() {
             *client = Some(ipc);
             set_status(status, RpcStatus::Connected);
             return;
@@ -246,7 +261,7 @@ fn try_connect(
     set_status(status, RpcStatus::WaitingForDiscord);
 }
 
-fn run_rpc_worker(
+fn rpc_worker_loop(
     mut enabled: bool,
     mut client_id: String,
     rx: crossbeam_channel::Receiver<RpcCommand>,
@@ -254,14 +269,16 @@ fn run_rpc_worker(
 ) {
     let mut client: Option<DiscordIpcClient> = None;
     let mut current_track: Option<RpcTrackInfo> = None;
+    let mut track_updated_at = Instant::now();
     let mut activity_set = false;
     let mut last_attempt: Option<Instant> = None;
 
-    if enabled && !client_id.is_empty() {
+    if enabled {
         try_connect(
             &client_id,
             &mut client,
             current_track.as_ref(),
+            track_updated_at,
             &mut activity_set,
             &status,
             &mut last_attempt,
@@ -270,11 +287,11 @@ fn run_rpc_worker(
 
     loop {
         match rx.recv_timeout(Duration::from_millis(500)) {
-            Ok(RpcCommand::Configure {
+            Ok(RpcCommand::SetConfig {
                 enabled: new_enabled,
                 client_id: new_id,
             }) => {
-                let id_changed = new_id != client_id;
+                let id_changed = effective_client_id(&client_id) != effective_client_id(&new_id);
                 let was_enabled = enabled;
                 enabled = new_enabled;
                 client_id = new_id;
@@ -286,19 +303,13 @@ fn run_rpc_worker(
                     continue;
                 }
 
-                if client_id.is_empty() {
-                    disconnect_client(&mut client, &mut activity_set);
-                    last_attempt = None;
-                    set_status(&status, RpcStatus::NeedsClientId);
-                    continue;
-                }
-
                 if id_changed || !was_enabled || client.is_none() {
                     disconnect_client(&mut client, &mut activity_set);
                     try_connect(
                         &client_id,
                         &mut client,
                         current_track.as_ref(),
+                        track_updated_at,
                         &mut activity_set,
                         &status,
                         &mut last_attempt,
@@ -307,11 +318,13 @@ fn run_rpc_worker(
             }
             Ok(RpcCommand::UpdateTrack(track)) => {
                 current_track = track;
-                if !enabled || client_id.is_empty() {
+                track_updated_at = Instant::now();
+                if !enabled {
                     continue;
                 }
                 if let Some(ref mut ipc) = client {
-                    if apply_track_to_client(ipc, current_track.as_ref(), &mut activity_set).is_err()
+                    if push_activity(ipc, current_track.as_ref(), track_updated_at, &mut activity_set)
+                        .is_err()
                     {
                         disconnect_client(&mut client, &mut activity_set);
                         last_attempt = Some(Instant::now());
@@ -324,15 +337,16 @@ fn run_rpc_worker(
                 break;
             }
             Err(RecvTimeoutError::Timeout) => {
-                if enabled && !client_id.is_empty() && client.is_none() {
+                if enabled && client.is_none() {
                     let due = last_attempt
-                        .map(|t| t.elapsed() >= RECONNECT_INTERVAL)
+                        .map(|t| t.elapsed() >= RETRY_INTERVAL)
                         .unwrap_or(true);
                     if due {
                         try_connect(
                             &client_id,
                             &mut client,
                             current_track.as_ref(),
+                            track_updated_at,
                             &mut activity_set,
                             &status,
                             &mut last_attempt,

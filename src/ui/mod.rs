@@ -16,7 +16,7 @@ use crate::audio::{AudioCommand, AudioTrackSpec, DjSettings, EngineSnapshot};
 use crate::config::{AppConfig, PlaybackMode, RepeatMode};
 use crate::covers::{set_custom_cover, CoverManager};
 use crate::discord_rpc::{DiscordRpcManager, RpcTrackInfo};
-use crate::i18n::tr;
+use crate::i18n::{tr, Language};
 use crate::library::{
     create_playlist, delete_track, import_audio_files, import_pc_folder_as_playlist, rename_track,
     reveal_in_explorer, scan_library, Playlist, Track,
@@ -35,10 +35,11 @@ use crate::ui::shader::LiquidBackdrop;
 use crate::ui::sidebar::{show_sidebar, SidebarAction, ViewSelection};
 use crate::ui::theme::{
     draw_liquid_glass_panel, font_regular, font_semibold, frosted_cta_button, glass_icon_button,
-    glass_pill_button, install_fonts_and_style, GlassLevel, DANGER_GLASS, GLASS_PILL_IDLE,
-    RIM_SUBTLE, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
+    glass_pill_button, install_fonts_and_style, rgba, GlassLevel, DANGER_GLASS, FROST_CTA_IDLE,
+    GLASS_PILL_IDLE, RIM_SUBTLE, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 use crate::ui::visualizer::{AudioVisualizerState, VisualizerConfig};
+use crate::updater::{format_bytes_mb, UpdateManager, UpdateReason, UpdateStatus, CURRENT_VERSION};
 use egui::{
     Align2, Color32, ColorImage, Context, CornerRadius, Pos2, Rect, ResizeDirection, Sense, Stroke,
     StrokeKind, TextureHandle, TextureOptions, Vec2, ViewportCommand,
@@ -85,6 +86,7 @@ pub struct RustifyApp {
     lyrics_mgr: LyricsManager,
     media_controls: SystemMediaController,
     discord_rpc: DiscordRpcManager,
+    updater: UpdateManager,
 
     play_queue: Vec<PathBuf>,
     queue_pos: usize,
@@ -103,6 +105,7 @@ pub struct RustifyApp {
     queue_open: bool,
     lyrics_open: bool,
     settings_open: bool,
+    update_popup_open: bool,
     mini_mode: bool,
     visualizer: AudioVisualizerState,
     import_modal: PlaylistImportModalState,
@@ -155,6 +158,7 @@ impl RustifyApp {
             lyrics_mgr: LyricsManager::new(),
             media_controls,
             discord_rpc,
+            updater: UpdateManager::new(),
             play_queue: Vec::new(),
             queue_pos: 0,
             user_queue: VecDeque::new(),
@@ -170,6 +174,7 @@ impl RustifyApp {
             queue_open: false,
             lyrics_open: false,
             settings_open: false,
+            update_popup_open: false,
             mini_mode: false,
             visualizer: AudioVisualizerState::new(VisualizerConfig::default()),
             import_modal: PlaylistImportModalState::default(),
@@ -252,6 +257,11 @@ impl RustifyApp {
                 _ => {}
             }
         }
+        if app.capture_path.is_none() {
+            app.updater
+                .check_now(app.config.last_known_release_size, true);
+        }
+
         app
     }
 
@@ -727,6 +737,12 @@ impl RustifyApp {
             }
             if self.delete_dialog.is_some() {
                 self.delete_dialog = None;
+                return;
+            }
+            if self.update_popup_open
+                && !matches!(self.updater.status(), UpdateStatus::Downloading { .. })
+            {
+                self.update_popup_open = false;
                 return;
             }
             if self.import_modal.open {
@@ -1314,6 +1330,295 @@ impl RustifyApp {
         }
     }
 
+    fn show_update_popup(&mut self, ui: &mut egui::Ui, screen: Rect) {
+        if !self.update_popup_open {
+            return;
+        }
+
+        let (info, download_progress) = match self.updater.status() {
+            UpdateStatus::Available(info) => (info.clone(), None),
+            UpdateStatus::Downloading {
+                info,
+                downloaded_bytes,
+                total_bytes,
+            } => (info.clone(), Some((*downloaded_bytes, *total_bytes))),
+            _ => {
+                self.update_popup_open = false;
+                return;
+            }
+        };
+
+        let is_de = self.config.language == Language::De;
+        let is_downloading = download_progress.is_some();
+
+        let scrim_resp = ui.interact(screen, ui.id().with("update_popup_scrim"), Sense::click());
+        ui.painter().rect_filled(
+            screen,
+            CornerRadius::ZERO,
+            Color32::from_rgba_unmultiplied(0, 0, 0, 180),
+        );
+
+        let card_w = 440.0f32.min(screen.width() - 40.0);
+        let card_h = 278.0f32.min(screen.height() - 40.0);
+        let card = Rect::from_center_size(screen.center(), Vec2::new(card_w, card_h));
+
+        if !is_downloading
+            && scrim_resp.clicked()
+            && !card.contains(scrim_resp.interact_pointer_pos().unwrap_or(Pos2::ZERO))
+        {
+            self.update_popup_open = false;
+            return;
+        }
+
+        draw_liquid_glass_panel(ui.painter(), card, 16, GlassLevel::Modal);
+
+        let inner = card.shrink2(Vec2::new(22.0, 18.0));
+        let mut c = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(inner)
+                .layout(egui::Layout::top_down(egui::Align::LEFT)),
+        );
+
+        // Header
+        c.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(if is_de {
+                    "Update verfügbar"
+                } else {
+                    "Update available"
+                })
+                .font(font_semibold(17.0))
+                .color(TEXT_PRIMARY),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if !is_downloading
+                    && glass_icon_button(ui, Icon::Close, 26.0, 11.0, false, false).clicked()
+                {
+                    self.update_popup_open = false;
+                }
+            });
+        });
+
+        c.add_space(10.0);
+
+        // Version comparison pill
+        let pill_text = if info.asset_size > 0 {
+            format!(
+                "v{CURRENT_VERSION}  →  v{}  ·  {}",
+                info.version,
+                format_bytes_mb(info.asset_size)
+            )
+        } else {
+            format!("v{CURRENT_VERSION}  →  v{}", info.version)
+        };
+        let (pill_r, _) = c.allocate_exact_size(Vec2::new(inner.width(), 30.0), Sense::hover());
+        c.painter()
+            .rect_filled(pill_r, CornerRadius::same(8), GLASS_PILL_IDLE);
+        c.painter().rect_stroke(
+            pill_r,
+            CornerRadius::same(8),
+            Stroke::new(1.0_f32, RIM_SUBTLE),
+            StrokeKind::Inside,
+        );
+        c.painter().text(
+            pill_r.center(),
+            Align2::CENTER_CENTER,
+            pill_text,
+            font_semibold(12.0),
+            TEXT_PRIMARY,
+        );
+
+        if info.reason == UpdateReason::SizeChanged {
+            c.add_space(6.0);
+            c.label(
+                egui::RichText::new(if is_de {
+                    "Neue Installer-Datei erkannt"
+                } else {
+                    "Updated installer detected"
+                })
+                .font(font_semibold(11.0))
+                .color(Color32::from_rgb(218, 198, 128)),
+            );
+        }
+
+        c.add_space(8.0);
+
+        // Release notes snippet
+        let notes_text = if info.notes.trim().is_empty() {
+            if is_de {
+                "Eine neue Version von Rustify steht zum Download bereit."
+            } else {
+                "A new version of Rustify is ready to download."
+            }
+            .to_string()
+        } else {
+            info.notes.clone()
+        };
+        let notes_box_h = if is_downloading { 56.0 } else { 78.0 };
+        egui::ScrollArea::vertical()
+            .id_salt("update_popup_notes_scroll")
+            .max_height(notes_box_h)
+            .auto_shrink([false, true])
+            .show(&mut c, |scroll| {
+                scroll.add(
+                    egui::Label::new(
+                        egui::RichText::new(&notes_text)
+                            .font(font_regular(11.5))
+                            .color(TEXT_SECONDARY),
+                    )
+                    .wrap(),
+                );
+            });
+
+        // Live download progress bar when downloading
+        if let Some((dl, tot)) = download_progress {
+            let frac = if tot > 0 {
+                (dl as f32 / tot as f32).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let pct = (frac * 100.0).round() as u32;
+            let prog_area = Rect::from_min_max(
+                Pos2::new(inner.left(), inner.bottom() - 88.0),
+                Pos2::new(inner.right(), inner.bottom() - 52.0),
+            );
+            let p = ui.painter();
+            let status_txt = if tot > 0 {
+                if is_de {
+                    format!(
+                        "Lade Installer… {} / {}",
+                        format_bytes_mb(dl),
+                        format_bytes_mb(tot)
+                    )
+                } else {
+                    format!(
+                        "Downloading installer… {} / {}",
+                        format_bytes_mb(dl),
+                        format_bytes_mb(tot)
+                    )
+                }
+            } else if is_de {
+                format!("Lade Installer… {}", format_bytes_mb(dl))
+            } else {
+                format!("Downloading installer… {}", format_bytes_mb(dl))
+            };
+            p.text(
+                Pos2::new(prog_area.left(), prog_area.top() + 8.0),
+                Align2::LEFT_CENTER,
+                status_txt,
+                font_regular(11.5),
+                TEXT_SECONDARY,
+            );
+            p.text(
+                Pos2::new(prog_area.right(), prog_area.top() + 8.0),
+                Align2::RIGHT_CENTER,
+                format!("{pct}%"),
+                font_semibold(11.5),
+                TEXT_PRIMARY,
+            );
+            let bar_r = Rect::from_min_max(
+                Pos2::new(prog_area.left(), prog_area.top() + 22.0),
+                Pos2::new(prog_area.right(), prog_area.top() + 30.0),
+            );
+            p.rect_filled(bar_r, CornerRadius::same(4), rgba(255, 255, 255, 18));
+            if frac > 0.005 {
+                let fill_r = Rect::from_min_max(
+                    bar_r.min,
+                    Pos2::new(
+                        bar_r.left() + (bar_r.width() * frac).max(6.0),
+                        bar_r.bottom(),
+                    ),
+                );
+                p.rect_filled(fill_r, CornerRadius::same(4), FROST_CTA_IDLE);
+            }
+        }
+
+        // Action buttons row
+        let mut start_now = false;
+        let mut close_now = false;
+        let mut disable_popup = false;
+
+        let actions_rect = Rect::from_min_max(
+            Pos2::new(inner.left(), inner.bottom() - 62.0),
+            Pos2::new(inner.right(), inner.bottom() - 26.0),
+        );
+        if !is_downloading {
+            let mut a_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(actions_rect)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            );
+            if frosted_cta_button(
+                &mut a_ui,
+                None,
+                if is_de { "Jetzt updaten" } else { "Update now" },
+                34.0,
+            )
+            .clicked()
+            {
+                start_now = true;
+            }
+            a_ui.add_space(8.0);
+            if glass_pill_button(
+                &mut a_ui,
+                None,
+                if is_de { "Später" } else { "Later" },
+                34.0,
+                false,
+            )
+            .clicked()
+            {
+                close_now = true;
+            }
+        }
+
+        // Bottom clickable row: Disable startup popup
+        let disable_rect = Rect::from_min_max(
+            Pos2::new(inner.left(), inner.bottom() - 20.0),
+            Pos2::new(inner.right(), inner.bottom()),
+        );
+        let disable_resp = ui
+            .interact(
+                disable_rect,
+                ui.id().with("update_popup_disable_startup"),
+                Sense::click(),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        ui.painter().text(
+            disable_rect.center(),
+            Align2::CENTER_CENTER,
+            if is_de {
+                "Pop-Up beim Start deaktivieren"
+            } else {
+                "Disable startup popup"
+            },
+            font_regular(11.0),
+            if disable_resp.hovered() {
+                TEXT_PRIMARY
+            } else {
+                TEXT_MUTED
+            },
+        );
+        if disable_resp.clicked() && !is_downloading {
+            disable_popup = true;
+        }
+
+        if start_now {
+            self.updater.start_download_and_install(info);
+        } else if disable_popup {
+            self.config.update_popup_enabled = false;
+            self.config.save();
+            self.update_popup_open = false;
+            self.show_toast(if is_de {
+                "Update-Pop-Up beim Start deaktiviert"
+            } else {
+                "Startup update popup disabled"
+            });
+        } else if close_now {
+            self.update_popup_open = false;
+        }
+    }
+
     fn draw_toast(&mut self, painter: &egui::Painter, screen: Rect) {
         let Some(ref toast) = self.toast else {
             return;
@@ -1663,6 +1968,22 @@ impl eframe::App for RustifyApp {
         }
 
         self.poll_background_events();
+        let upd = self.updater.poll();
+        if let Some(sz) = upd.save_baseline_size {
+            self.config.last_known_release_size = sz;
+            self.config.save();
+        }
+        if upd.open_startup_popup && self.config.update_popup_enabled {
+            self.update_popup_open = true;
+        }
+        if upd.should_exit_for_install {
+            self.config.save();
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+            return;
+        }
+        if let Some(err) = upd.error_toast {
+            self.show_toast(err);
+        }
         self.handle_keyboard_shortcuts(ctx);
         let dragging_files = self.handle_file_drops(ctx);
 
@@ -2108,6 +2429,7 @@ impl eframe::App for RustifyApp {
                     &mut self.settings_open,
                     &mut self.config,
                     self.discord_rpc.status(),
+                    self.updater.status(),
                 ) {
                     let s = tr(self.config.language);
                     match set_act {
@@ -2152,11 +2474,21 @@ impl eframe::App for RustifyApp {
                             self.bpm.clear_cache_and_reanalyze(&all_paths);
                             self.show_toast(s.toast_bpm_restarted);
                         }
+                        SettingsAction::CheckForUpdates => {
+                            self.updater
+                                .check_now(self.config.last_known_release_size, false);
+                        }
+                        SettingsAction::StartUpdate => {
+                            if let UpdateStatus::Available(info) = self.updater.status().clone() {
+                                self.updater.start_download_and_install(info);
+                            }
+                        }
                     }
                 }
 
                 self.show_rename_dialog(ui, screen);
                 self.show_delete_dialog(ui, screen);
+                self.show_update_popup(ui, screen);
                 self.draw_toast(ui.painter(), screen);
             });
 
@@ -2168,6 +2500,7 @@ impl eframe::App for RustifyApp {
             || self.bpm.is_analyzing()
             || self.covers.progress().is_some()
             || self.lyrics_mgr.is_loading()
+            || self.updater.is_busy()
             || self.toast.is_some();
 
         if need_fast {

@@ -107,6 +107,12 @@ pub struct AppConfig {
     #[serde(default)]
     pub discord_client_id: String,
 
+    // Auto-Updater settings
+    #[serde(default = "default_true")]
+    pub update_popup_enabled: bool,
+    #[serde(default)]
+    pub last_known_release_size: u64,
+
     // Visual settings
     pub animated_glass_backdrop: bool,
 }
@@ -138,6 +144,8 @@ impl Default for AppConfig {
             loudness_normalization: true,
             discord_rpc_enabled: true,
             discord_client_id: String::new(),
+            update_popup_enabled: true,
+            last_known_release_size: 0,
             animated_glass_backdrop: true,
         }
     }

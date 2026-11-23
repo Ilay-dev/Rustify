@@ -9,6 +9,7 @@ mod library;
 mod lyrics;
 mod media_controls;
 mod ui;
+mod updater;
 
 use crate::ui::RustifyApp;
 use egui::{IconData, ViewportBuilder};

@@ -45,9 +45,13 @@
   - **60 Hz** (Sub-Bass), **230 Hz** (Bass), **910 Hz** (Mids), **3.6 kHz** (Presence), **14 kHz** (Treble) from `-12 dB` to `+12 dB`.
   - Built-in presets: *Flat*, *Bass Boost*, *Hardstyle*, *Vocals*, *Pop / Rock*, and *Custom*.
 
-### Discord Rich Presence
-- Native pure-Rust Discord IPC integration (`ActivityType::Listening`) displaying the current track title, artist, playlist, and a live progress bar right on your Discord profile.
-- Automatically reconnects if Discord starts later, clears presence cleanly on pause/exit, and can be toggled with your Discord Application ID directly in **Settings**.
+### Discord Rich Presence (Zero-Config)
+- Native pure-Rust Discord IPC integration (`ActivityType::Listening`) works **out of the box** using the official built-in Rustify Application ID — displaying the current track title, artist, playlist, and a live progress bar right on your Discord profile.
+- Automatically reconnects if Discord starts later, clears presence cleanly on pause/exit, and can be toggled or overridden with a custom Discord Application ID in **Settings**.
+
+### Automatic GitHub Release Updates
+- Automatically checks GitHub Releases in the background on startup and notifies you via a Liquid Glass update popup (which can be disabled anytime in **Settings**).
+- Supports one-click in-app download with live progress and seamless installer launch, plus manual update checks directly from **Settings**.
 
 ### Synchronized Lyrics (LRCLIB)
 - Click the microphone icon in the player bar to open the Liquid Glass karaoke lyrics view.
