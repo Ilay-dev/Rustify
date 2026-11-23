@@ -1,6 +1,6 @@
 ; Rustify — Official Windows Installer Script (Inno Setup 6)
 #define MyAppName "Rustify"
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "1.3.0"
 #define MyAppPublisher "Ilay-dev"
 #define MyAppURL "https://github.com/Ilay-dev/Rustify"
 #define MyAppExeName "Rustify.exe"

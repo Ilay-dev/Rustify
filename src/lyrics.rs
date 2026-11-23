@@ -49,6 +49,13 @@ pub enum LyricsState {
     NotFound,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VisualizerLyricsFrame {
+    pub prev: Option<String>,
+    pub current: Option<String>,
+    pub next: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum LyricsAction {
     SeekTo(f32),
@@ -136,6 +143,49 @@ impl LyricsManager {
             track.effective_duration(),
             true,
         ));
+    }
+
+    pub fn active_lines_for(
+        &self,
+        track_path: &Path,
+        position_sec: f32,
+    ) -> Option<VisualizerLyricsFrame> {
+        let Some(LyricsState::Loaded(lyrics)) = self.cache.get(track_path) else {
+            return None;
+        };
+        if lyrics.instrumental || lyrics.synced.is_empty() {
+            return None;
+        }
+
+        let clean = |s: &str| {
+            let t = s.trim();
+            (!t.is_empty()).then(|| t.to_string())
+        };
+
+        let active_idx = lyrics
+            .synced
+            .iter()
+            .rposition(|line| line.time_sec <= position_sec + 0.16);
+
+        let frame = if let Some(idx) = active_idx {
+            VisualizerLyricsFrame {
+                prev: idx.checked_sub(1).and_then(|i| clean(&lyrics.synced[i].text)),
+                current: clean(&lyrics.synced[idx].text),
+                next: lyrics.synced.get(idx + 1).and_then(|l| clean(&l.text)),
+            }
+        } else {
+            VisualizerLyricsFrame {
+                prev: None,
+                current: None,
+                next: lyrics.synced.first().and_then(|l| clean(&l.text)),
+            }
+        };
+
+        if frame.prev.is_some() || frame.current.is_some() || frame.next.is_some() {
+            Some(frame)
+        } else {
+            None
+        }
     }
 }
 
@@ -925,4 +975,94 @@ fn draw_centered_message(
     }
 
     clicked_retry
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_lines_for_returns_prev_current_next() {
+        let mut mgr = LyricsManager::new();
+        let path = PathBuf::from("test_track.mp3");
+        mgr.cache.insert(
+            path.clone(),
+            LyricsState::Loaded(TrackLyrics {
+                synced: vec![
+                    LyricLine {
+                        time_sec: 10.0,
+                        text: "  First line  ".to_string(),
+                    },
+                    LyricLine {
+                        time_sec: 20.0,
+                        text: "Second line".to_string(),
+                    },
+                    LyricLine {
+                        time_sec: 30.0,
+                        text: "Third line".to_string(),
+                    },
+                ],
+                plain: Vec::new(),
+                instrumental: false,
+            }),
+        );
+
+        // Before first timestamp
+        assert_eq!(
+            mgr.active_lines_for(&path, 5.0),
+            Some(VisualizerLyricsFrame {
+                prev: None,
+                current: None,
+                next: Some("First line".to_string()),
+            })
+        );
+
+        // Lead-in tolerance (+0.16s) activates first line at 9.85s
+        assert_eq!(
+            mgr.active_lines_for(&path, 9.85),
+            Some(VisualizerLyricsFrame {
+                prev: None,
+                current: Some("First line".to_string()),
+                next: Some("Second line".to_string()),
+            })
+        );
+
+        // Middle line
+        assert_eq!(
+            mgr.active_lines_for(&path, 22.0),
+            Some(VisualizerLyricsFrame {
+                prev: Some("First line".to_string()),
+                current: Some("Second line".to_string()),
+                next: Some("Third line".to_string()),
+            })
+        );
+
+        // Last line
+        assert_eq!(
+            mgr.active_lines_for(&path, 45.0),
+            Some(VisualizerLyricsFrame {
+                prev: Some("Second line".to_string()),
+                current: Some("Third line".to_string()),
+                next: None,
+            })
+        );
+
+        // Instrumental returns None
+        let inst_path = PathBuf::from("instrumental.mp3");
+        mgr.cache.insert(
+            inst_path.clone(),
+            LyricsState::Loaded(TrackLyrics {
+                synced: vec![LyricLine {
+                    time_sec: 1.0,
+                    text: "Ignored".to_string(),
+                }],
+                plain: Vec::new(),
+                instrumental: true,
+            }),
+        );
+        assert_eq!(mgr.active_lines_for(&inst_path, 2.0), None);
+
+        // Unknown / not found returns None
+        assert_eq!(mgr.active_lines_for(Path::new("missing.mp3"), 10.0), None);
+    }
 }

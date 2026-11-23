@@ -1,8 +1,10 @@
 use crate::audio::engine::AudioEngine;
 use crate::i18n::Language;
+use crate::lyrics::VisualizerLyricsFrame;
 use crate::ui::theme::{
-    font_regular, font_semibold, glass_slider, rgba, GLASS_PILL_ACTIVE, GLASS_PILL_IDLE,
-    RIM_BRIGHT, RIM_SUBTLE, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
+    font_regular, font_semibold, glass_slider, glass_toggle, rgba, FROST_CTA_IDLE, FROST_CTA_TEXT,
+    GLASS_PILL_ACTIVE, GLASS_PILL_IDLE, RIM_BRIGHT, RIM_SUBTLE, TEXT_MUTED, TEXT_PRIMARY,
+    TEXT_SECONDARY,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
@@ -92,6 +94,17 @@ impl FreqScale {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum VisualizerLyricsPosition {
+    Top,
+    #[default]
+    Bottom,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VisualizerConfig {
     #[serde(default)]
@@ -103,6 +116,10 @@ pub struct VisualizerConfig {
     pub freq_scale: FreqScale,
     pub line_width: f32,
     pub history_limit: usize,
+    #[serde(default = "default_true")]
+    pub show_lyrics: bool,
+    #[serde(default)]
+    pub lyrics_position: VisualizerLyricsPosition,
 }
 
 impl Default for VisualizerConfig {
@@ -116,6 +133,8 @@ impl Default for VisualizerConfig {
             freq_scale: FreqScale::Dynamic,
             line_width: 2.5,
             history_limit: 15,
+            show_lyrics: true,
+            lyrics_position: VisualizerLyricsPosition::Bottom,
         }
     }
 }
@@ -286,7 +305,12 @@ impl AudioVisualizerState {
 
     /// Updates the 4096-point FFT frequency spectrum from the selected audio source
     /// and renders the secondary AudioVisualizer viewport window.
-    pub fn show_window(&mut self, ctx: &Context, engine: &AudioEngine) {
+    pub fn show_window(
+        &mut self,
+        ctx: &Context,
+        engine: &AudioEngine,
+        lyrics: Option<&VisualizerLyricsFrame>,
+    ) {
         self.sync_capture_stream();
 
         if !self.open {
@@ -459,6 +483,13 @@ impl AudioVisualizerState {
                         0.0,
                         true,
                     );
+
+                    // 3. Synchronized 3-line Karaoke Lyrics overlay
+                    if self.config.show_lyrics {
+                        if let Some(lyr) = lyrics {
+                            draw_visualizer_lyrics(painter, rect, &self.config, lyr);
+                        }
+                    }
 
                     // Subtle pause indicator when paused (matching website behavior)
                     if self.paused {
@@ -724,6 +755,158 @@ fn draw_visualizer_path(
     }
 }
 
+fn draw_visualizer_lyrics(
+    painter: &egui::Painter,
+    rect: Rect,
+    config: &VisualizerConfig,
+    lyrics: &VisualizerLyricsFrame,
+) {
+    if rect.width() <= 60.0 || rect.height() <= 60.0 {
+        return;
+    }
+
+    let max_w = (rect.width() * 0.78).clamp(240.0, 960.0);
+    let s = (rect.height() / 640.0).clamp(0.76, 1.45);
+
+    let prev_font = font_regular((16.0 * s).clamp(12.0, 22.0));
+    let cur_font = font_semibold((25.0 * s).clamp(18.0, 36.0));
+    let next_font = font_regular((16.0 * s).clamp(12.0, 22.0));
+
+    let prev_col = rgba(210, 214, 224, 138);
+    let cur_col = rgba(255, 255, 255, 248);
+    let next_col = rgba(210, 214, 224, 152);
+
+    let make_galley = |text: &str, font: egui::FontId, color: Color32| {
+        let mut job = egui::text::LayoutJob::default();
+        job.halign = egui::Align::Center;
+        job.wrap.max_width = max_w;
+        job.append(
+            text,
+            0.0,
+            egui::TextFormat {
+                font_id: font,
+                color,
+                ..Default::default()
+            },
+        );
+        painter.layout_job(job)
+    };
+
+    let prev_galley = lyrics
+        .prev
+        .as_deref()
+        .map(|t| make_galley(t, prev_font, prev_col));
+    let cur_galley = lyrics
+        .current
+        .as_deref()
+        .map(|t| make_galley(t, cur_font, cur_col));
+    let next_galley = lyrics
+        .next
+        .as_deref()
+        .map(|t| make_galley(t, next_font, next_col));
+
+    if prev_galley.is_none() && cur_galley.is_none() && next_galley.is_none() {
+        return;
+    }
+
+    let side_min_h = (22.0 * s).clamp(16.0, 32.0);
+    let cur_min_h = (34.0 * s).clamp(24.0, 48.0);
+    let gap = (7.0 * s).clamp(5.0, 11.0);
+
+    let prev_h = prev_galley
+        .as_ref()
+        .map(|g| g.size().y)
+        .unwrap_or(0.0)
+        .max(side_min_h);
+    let cur_h = cur_galley
+        .as_ref()
+        .map(|g| g.size().y)
+        .unwrap_or(0.0)
+        .max(cur_min_h);
+    let next_h = next_galley
+        .as_ref()
+        .map(|g| g.size().y)
+        .unwrap_or(0.0)
+        .max(side_min_h);
+    let total_h = prev_h + gap + cur_h + gap + next_h;
+
+    let block_top = match config.lyrics_position {
+        VisualizerLyricsPosition::Top => rect.top() + (rect.height() * 0.055).clamp(24.0, 54.0),
+        VisualizerLyricsPosition::Bottom => {
+            rect.bottom() - (rect.height() * 0.06).clamp(26.0, 56.0) - total_h
+        }
+    };
+
+    let prev_slot_top = block_top;
+    let cur_slot_top = prev_slot_top + prev_h + gap;
+    let next_slot_top = cur_slot_top + cur_h + gap;
+
+    let center_x = rect.center().x;
+    let prev_y = prev_galley
+        .as_ref()
+        .map(|g| prev_slot_top + (prev_h - g.size().y) * 0.5);
+    let cur_y = cur_galley
+        .as_ref()
+        .map(|g| cur_slot_top + (cur_h - g.size().y) * 0.5);
+    let next_y = next_galley
+        .as_ref()
+        .map(|g| next_slot_top + (next_h - g.size().y) * 0.5);
+
+    let mut vis_bounds: Option<Rect> = None;
+    let mut include_galley = |g: &egui::Galley, y: f32| {
+        let r = g.rect.translate(Vec2::new(center_x, y));
+        vis_bounds = Some(match vis_bounds {
+            Some(existing) => existing.union(r),
+            None => r,
+        });
+    };
+    if let (Some(g), Some(y)) = (&prev_galley, prev_y) {
+        include_galley(g, y);
+    }
+    if let (Some(g), Some(y)) = (&cur_galley, cur_y) {
+        include_galley(g, y);
+    }
+    if let (Some(g), Some(y)) = (&next_galley, next_y) {
+        include_galley(g, y);
+    }
+
+    if let Some(bounds) = vis_bounds {
+        let bg = config.bg_color;
+        let pill_rect = bounds.expand2(Vec2::new(24.0, 12.0));
+        painter.rect_filled(
+            pill_rect,
+            CornerRadius::same(16),
+            Color32::from_rgba_unmultiplied(bg[0] / 2, bg[1] / 2, bg[2] / 2, 118),
+        );
+    }
+
+    let shadow_col = rgba(0, 0, 0, 175);
+    if let (Some(g), Some(y)) = (prev_galley, prev_y) {
+        painter.galley_with_override_text_color(
+            Pos2::new(center_x, y + 1.5),
+            g.clone(),
+            shadow_col,
+        );
+        painter.galley(Pos2::new(center_x, y), g, prev_col);
+    }
+    if let (Some(g), Some(y)) = (cur_galley, cur_y) {
+        painter.galley_with_override_text_color(
+            Pos2::new(center_x, y + 1.5),
+            g.clone(),
+            shadow_col,
+        );
+        painter.galley(Pos2::new(center_x, y), g, cur_col);
+    }
+    if let (Some(g), Some(y)) = (next_galley, next_y) {
+        painter.galley_with_override_text_color(
+            Pos2::new(center_x, y + 1.5),
+            g.clone(),
+            shadow_col,
+        );
+        painter.galley(Pos2::new(center_x, y), g, next_col);
+    }
+}
+
 /// Renders the AudioVisualizer burger-menu settings directly inside the left Sidebar
 /// whenever the Visualizer window is open!
 pub fn draw_sidebar_visualizer_settings(
@@ -973,6 +1156,84 @@ pub fn draw_sidebar_visualizer_settings(
             }
         });
 
+    ui.add_space(10.0);
+
+    // 4. Synchronized Lyrics Overlay toggle & position selector
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("LYRICS")
+                .font(font_semibold(9.5))
+                .color(TEXT_SECONDARY),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if glass_toggle(ui, &mut viz.config.show_lyrics).changed() {
+                changed = true;
+            }
+        });
+    });
+
+    if viz.config.show_lyrics {
+        ui.add_space(6.0);
+        let total_w = ui.available_width();
+        let (group_rect, _) = ui.allocate_exact_size(Vec2::new(total_w, 28.0), Sense::hover());
+        ui.painter().rect_filled(
+            group_rect,
+            CornerRadius::same(8),
+            Color32::from_rgba_unmultiplied(0, 0, 0, 90),
+        );
+        ui.painter().rect_stroke(
+            group_rect,
+            CornerRadius::same(8),
+            Stroke::new(1.0_f32, RIM_SUBTLE),
+            StrokeKind::Inside,
+        );
+
+        let inner_w = (group_rect.width() - 4.0).max(20.0);
+        let seg_w = inner_w * 0.5;
+        let positions = [
+            (
+                VisualizerLyricsPosition::Top,
+                if is_de { "Oben" } else { "Top" },
+            ),
+            (
+                VisualizerLyricsPosition::Bottom,
+                if is_de { "Unten" } else { "Bottom" },
+            ),
+        ];
+
+        for (i, (pos, label)) in positions.iter().enumerate() {
+            let sel = viz.config.lyrics_position == *pos;
+            let sr = Rect::from_min_size(
+                Pos2::new(
+                    group_rect.left() + 2.0 + i as f32 * seg_w,
+                    group_rect.top() + 2.0,
+                ),
+                Vec2::new(seg_w, 24.0),
+            );
+            let resp = ui
+                .interact(sr, ui.id().with(("viz_lyrics_pos", i)), Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if sel {
+                ui.painter()
+                    .rect_filled(sr, CornerRadius::same(6), FROST_CTA_IDLE);
+            } else if resp.hovered() {
+                ui.painter()
+                    .rect_filled(sr, CornerRadius::same(6), GLASS_PILL_IDLE);
+            }
+            ui.painter().text(
+                sr.center(),
+                Align2::CENTER_CENTER,
+                *label,
+                font_semibold(11.0),
+                if sel { FROST_CTA_TEXT } else { TEXT_SECONDARY },
+            );
+            if resp.clicked() && !sel {
+                viz.config.lyrics_position = *pos;
+                changed = true;
+            }
+        }
+    }
+
     changed
 }
 
@@ -1007,5 +1268,4 @@ fn draw_label_with_badge(ui: &mut Ui, label: &str, badge: &str) {
         galley,
         TEXT_PRIMARY,
     );
-    let _ = GLASS_PILL_IDLE;
 }

@@ -38,7 +38,7 @@ use crate::ui::theme::{
     glass_pill_button, install_fonts_and_style, rgba, GlassLevel, DANGER_GLASS, FROST_CTA_IDLE,
     GLASS_PILL_IDLE, RIM_SUBTLE, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
 };
-use crate::ui::visualizer::{AudioVisualizerState, VisualizerConfig};
+use crate::ui::visualizer::{AudioVisualizerState, VisualizerConfig, VisualizerLyricsPosition};
 use crate::updater::{format_bytes_mb, UpdateManager, UpdateReason, UpdateStatus, CURRENT_VERSION};
 use egui::{
     Align2, Color32, ColorImage, Context, CornerRadius, Pos2, Rect, ResizeDirection, Sense, Stroke,
@@ -143,6 +143,15 @@ impl RustifyApp {
 
         let backdrop = cc.gl.as_ref().map(|gl| LiquidBackdrop::new(gl));
         let logo_tex = load_logo_texture(&cc.egui_ctx);
+        let viz_cfg = VisualizerConfig {
+            show_lyrics: config.visualizer_show_lyrics,
+            lyrics_position: if config.visualizer_lyrics_top {
+                VisualizerLyricsPosition::Top
+            } else {
+                VisualizerLyricsPosition::Bottom
+            },
+            ..VisualizerConfig::default()
+        };
 
         let mut app = Self {
             config,
@@ -176,7 +185,7 @@ impl RustifyApp {
             settings_open: false,
             update_popup_open: false,
             mini_mode: false,
-            visualizer: AudioVisualizerState::new(VisualizerConfig::default()),
+            visualizer: AudioVisualizerState::new(viz_cfg),
             import_modal: PlaylistImportModalState::default(),
             rename_dialog: None,
             delete_dialog: None,
@@ -2137,7 +2146,12 @@ impl eframe::App for RustifyApp {
                         SidebarAction::ToggleVisualizer => {
                             self.visualizer.open = !self.visualizer.open;
                         }
-                        SidebarAction::VisualizerConfigChanged => {}
+                        SidebarAction::VisualizerConfigChanged => {
+                            self.config.visualizer_show_lyrics = self.visualizer.config.show_lyrics;
+                            self.config.visualizer_lyrics_top = self.visualizer.config.lyrics_position
+                                == VisualizerLyricsPosition::Top;
+                            self.config.save();
+                        }
                         SidebarAction::OpenSettings => {
                             self.settings_open = true;
                         }
@@ -2492,7 +2506,27 @@ impl eframe::App for RustifyApp {
                 self.draw_toast(ui.painter(), screen);
             });
 
-        self.visualizer.show_window(ctx, &self.engine);
+        let viz_cur_track = self
+            .snap
+            .current_path
+            .as_deref()
+            .and_then(|p| self.find_track(p))
+            .cloned();
+        if self.visualizer.open && self.visualizer.config.show_lyrics {
+            if let Some(ref ct) = viz_cur_track {
+                self.lyrics_mgr.ensure_fetched(ct);
+            }
+        }
+        let viz_lyrics = if self.visualizer.open && self.visualizer.config.show_lyrics {
+            viz_cur_track
+                .as_ref()
+                .and_then(|ct| self.lyrics_mgr.active_lines_for(&ct.path, self.snap.position_sec))
+        } else {
+            None
+        };
+
+        self.visualizer
+            .show_window(ctx, &self.engine, viz_lyrics.as_ref());
 
         let need_fast = self.snap.is_playing
             || self.visualizer.open

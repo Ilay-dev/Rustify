@@ -64,6 +64,7 @@
   - **System Audio (Desktop)** — Windows WASAPI loopback for all desktop audio
   - **Microphone** — live microphone / line-in capture
 - Live customization directly in the left sidebar while open (*Classic*, *Neon Pulse*, *Ocean Waves*, *Custom* colors, thickness, trail delay, shape, and frequency scale).
+- **Live 3-Line Synchronized Lyrics Overlay**: displays the previous, current, and upcoming lyric lines right inside the AudioVisualizer window with a toggle and **Top / Bottom** positioning directly in the sidebar.
 
 ### Local Library, Covers & System Integration
 - Supports **MP3, FLAC, WAV, OGG, M4A, and AAC**.

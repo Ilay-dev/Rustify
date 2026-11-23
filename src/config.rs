@@ -115,6 +115,12 @@ pub struct AppConfig {
 
     // Visual settings
     pub animated_glass_backdrop: bool,
+
+    // AudioVisualizer Lyrics overlay settings
+    #[serde(default = "default_true")]
+    pub visualizer_show_lyrics: bool,
+    #[serde(default)]
+    pub visualizer_lyrics_top: bool,
 }
 
 fn default_true() -> bool {
@@ -147,6 +153,8 @@ impl Default for AppConfig {
             update_popup_enabled: true,
             last_known_release_size: 0,
             animated_glass_backdrop: true,
+            visualizer_show_lyrics: true,
+            visualizer_lyrics_top: false,
         }
     }
 }
