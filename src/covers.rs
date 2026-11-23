@@ -78,6 +78,22 @@ pub fn has_cover_on_disk(track_path: &Path) -> bool {
     cover_path_for_track(track_path).is_file()
 }
 
+pub fn migrate_cover_on_rename(old_path: &Path, new_path: &Path) {
+    let old_cover = cover_path_for_track(old_path);
+    let new_cover = cover_path_for_track(new_path);
+    if old_cover != new_cover && old_cover.is_file() {
+        if !new_cover.is_file() {
+            if fs::rename(&old_cover, &new_cover).is_err()
+                && fs::copy(&old_cover, &new_cover).is_ok()
+            {
+                let _ = fs::remove_file(&old_cover);
+            }
+        } else {
+            let _ = fs::remove_file(&old_cover);
+        }
+    }
+}
+
 fn url_encode(input: &str) -> String {
     let mut encoded = String::with_capacity(input.len() * 2);
     for &b in input.as_bytes() {
@@ -129,13 +145,14 @@ fn strip_search_tags(raw: &str) -> String {
 }
 
 fn curl_get_bytes(url: &str) -> Result<Vec<u8>, String> {
+    let safe_url = crate::config::validate_http_url(url)?;
     let mut cmd = Command::new("curl.exe");
     #[cfg(target_os = "windows")]
     {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     let output = cmd
-        .args(["-s", "-L", "--max-time", "10", "-A", "Rustify/1.0", url])
+        .args(["-s", "-L", "--max-time", "10", "-A", "Rustify/1.0", "--", safe_url])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
@@ -156,8 +173,9 @@ fn query_deezer(query: &str) -> Option<String> {
 
     for key in ["cover_xl", "cover_big", "cover_medium"] {
         if let Some(s) = album.get(key).and_then(|val| val.as_str()) {
-            if s.starts_with("http") {
-                return Some(s.to_string());
+            let trimmed = s.trim();
+            if trimmed.starts_with("http") {
+                return Some(trimmed.to_string());
             }
         }
     }
@@ -173,7 +191,8 @@ fn query_itunes(query: &str) -> Option<String> {
         .get("results")?
         .get(0)?
         .get("artworkUrl100")?
-        .as_str()?;
+        .as_str()?
+        .trim();
     if artwork.starts_with("http") {
         Some(artwork.replace("100x100bb", "500x500bb"))
     } else {

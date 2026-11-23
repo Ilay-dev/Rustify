@@ -221,6 +221,23 @@ pub fn normalize_path_key(path: &Path) -> String {
     path.to_string_lossy().to_lowercase()
 }
 
+pub fn validate_http_url(url: &str) -> Result<&str, String> {
+    if url.is_empty() || url.trim().is_empty() {
+        return Err("Empty URL".to_string());
+    }
+    if url.starts_with('-') {
+        return Err("Invalid URL: leading dash".to_string());
+    }
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("Invalid URL: whitespace or control characters".to_string());
+    }
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return Err("Invalid URL scheme: only http:// and https:// are allowed".to_string());
+    }
+    Ok(url)
+}
+
 pub fn is_audio_extension(ext: &str) -> bool {
     matches!(
         ext.to_ascii_lowercase().as_str(),
@@ -284,4 +301,24 @@ pub fn detect_suggested_music_dir() -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_http_url() {
+        assert!(validate_http_url("https://example.com/a.png").is_ok());
+        assert!(validate_http_url("http://example.com/a.png").is_ok());
+        assert!(validate_http_url("HTTPS://github.com/").is_ok());
+        assert!(validate_http_url("").is_err());
+        assert!(validate_http_url("   ").is_err());
+        assert!(validate_http_url("-o evil.exe").is_err());
+        assert!(validate_http_url("--config=evil").is_err());
+        assert!(validate_http_url("https://example.com/\n-o").is_err());
+        assert!(validate_http_url("https://example.com/a b.png").is_err());
+        assert!(validate_http_url("file:///etc/passwd").is_err());
+        assert!(validate_http_url("ftp://example.com/a").is_err());
+    }
 }

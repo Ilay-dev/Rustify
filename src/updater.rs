@@ -1,6 +1,8 @@
 use crossbeam_channel::{unbounded, Receiver, Sender};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -33,6 +35,7 @@ pub struct UpdateInfo {
     pub download_url: String,
     pub html_url: String,
     pub asset_size: u64,
+    pub sha256: Option<String>,
     pub notes: String,
     pub reason: UpdateReason,
 }
@@ -78,9 +81,7 @@ enum UpdateEvent {
         downloaded_bytes: u64,
         total_bytes: u64,
     },
-    ReadyToInstall {
-        installed_size: u64,
-    },
+    ReadyToInstall,
     Error {
         message: String,
         is_startup: bool,
@@ -261,10 +262,7 @@ impl UpdateManager {
                         }
                     }
                 }
-                UpdateEvent::ReadyToInstall { installed_size } => {
-                    if installed_size > 0 {
-                        result.save_baseline_size = Some(installed_size);
-                    }
+                UpdateEvent::ReadyToInstall => {
                     self.status = UpdateStatus::ReadyToInstall;
                     result.should_exit_for_install = true;
                 }
@@ -285,7 +283,82 @@ impl UpdateManager {
     }
 }
 
+fn is_allowed_github_download_url(url: &str) -> Result<&str, String> {
+    let safe_url = crate::config::validate_http_url(url)?;
+    if safe_url.starts_with("https://github.com/")
+        || safe_url.starts_with("https://objects.githubusercontent.com/")
+        || safe_url.starts_with("https://release-assets.githubusercontent.com/")
+    {
+        Ok(safe_url)
+    } else {
+        Err("Untrusted update download host".to_string())
+    }
+}
+
+fn parse_sha256_digest(asset: &serde_json::Value) -> Option<String> {
+    let raw = asset.get("digest")?.as_str()?.trim();
+    let hex = raw.strip_prefix("sha256:")?;
+    if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(hex.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+fn parse_sha256_from_body(body: &str) -> Option<String> {
+    for token in body.split(|c: char| !c.is_ascii_hexdigit()) {
+        if token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Some(token.to_ascii_lowercase());
+        }
+    }
+    None
+}
+
+fn verify_installer_file(path: &Path, expected_sha256: &str) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() < MIN_INSTALLER_BYTES {
+        return false;
+    }
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 65_536];
+    let mut checked_magic = false;
+    loop {
+        let Ok(n) = file.read(&mut buf) else {
+            return false;
+        };
+        if n == 0 {
+            break;
+        }
+        if !checked_magic {
+            if n < 2 || &buf[..2] != b"MZ" {
+                return false;
+            }
+            checked_magic = true;
+        }
+        hasher.update(&buf[..n]);
+    }
+    if !checked_magic {
+        return false;
+    }
+    let digest = hasher.finalize();
+    let actual_hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    actual_hex == expected_sha256.to_ascii_lowercase()
+}
+
 fn run_check_worker(tx: Sender<UpdateEvent>, last_known_size: u64, is_startup: bool) {
+    let Ok(api_url) = crate::config::validate_http_url(LATEST_RELEASE_API) else {
+        let _ = tx.send(UpdateEvent::Error {
+            message: "Invalid update API URL".to_string(),
+            is_startup,
+        });
+        return;
+    };
+
     let mut cmd = Command::new("curl.exe");
     cmd.args([
         "-sSL",
@@ -295,7 +368,8 @@ fn run_check_worker(tx: Sender<UpdateEvent>, last_known_size: u64, is_startup: b
         "User-Agent: Rustify-Updater",
         "-H",
         "Accept: application/vnd.github+json",
-        LATEST_RELEASE_API,
+        "--",
+        api_url,
     ])
     .stdout(Stdio::piped())
     .stderr(Stdio::null());
@@ -342,7 +416,7 @@ fn run_check_worker(tx: Sender<UpdateEvent>, last_known_size: u64, is_startup: b
     let raw_body = json.get("body").and_then(|v| v.as_str()).unwrap_or("");
     let notes = clamp_release_notes(raw_body, 320);
 
-    let mut chosen_asset: Option<(String, u64)> = None;
+    let mut chosen_asset: Option<(String, u64, Option<String>)> = None;
     if let Some(assets) = json.get("assets").and_then(|v| v.as_array()) {
         // Prefer exact Rustify-Setup.exe first
         for asset in assets {
@@ -353,7 +427,9 @@ fn run_check_worker(tx: Sender<UpdateEvent>, last_known_size: u64, is_startup: b
                 .unwrap_or("");
             let size = asset.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
             if name.eq_ignore_ascii_case("Rustify-Setup.exe") && !url.is_empty() {
-                chosen_asset = Some((url.to_string(), size));
+                let digest =
+                    parse_sha256_digest(asset).or_else(|| parse_sha256_from_body(raw_body));
+                chosen_asset = Some((url.to_string(), size, digest));
                 break;
             }
         }
@@ -367,14 +443,16 @@ fn run_check_worker(tx: Sender<UpdateEvent>, last_known_size: u64, is_startup: b
                     .unwrap_or("");
                 let size = asset.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
                 if name.to_ascii_lowercase().ends_with(".exe") && !url.is_empty() {
-                    chosen_asset = Some((url.to_string(), size));
+                    let digest =
+                        parse_sha256_digest(asset).or_else(|| parse_sha256_from_body(raw_body));
+                    chosen_asset = Some((url.to_string(), size, digest));
                     break;
                 }
             }
         }
     }
 
-    let (download_url, asset_size) = chosen_asset.unwrap_or_default();
+    let (download_url, asset_size, sha256) = chosen_asset.unwrap_or_default();
     let version = tag.trim().trim_start_matches(['v', 'V']).to_string();
 
     if let Some(reason) = detect_update(CURRENT_VERSION, tag, asset_size, last_known_size) {
@@ -385,12 +463,20 @@ fn run_check_worker(tx: Sender<UpdateEvent>, last_known_size: u64, is_startup: b
             });
             return;
         }
+        if is_allowed_github_download_url(&download_url).is_err() {
+            let _ = tx.send(UpdateEvent::Error {
+                message: "Release installer URL is not from a trusted GitHub host".to_string(),
+                is_startup,
+            });
+            return;
+        }
         let info = UpdateInfo {
             version,
             tag: tag.to_string(),
             download_url,
             html_url,
             asset_size,
+            sha256,
             notes,
             reason,
         };
@@ -405,6 +491,22 @@ fn run_check_worker(tx: Sender<UpdateEvent>, last_known_size: u64, is_startup: b
 }
 
 fn run_download_worker(tx: Sender<UpdateEvent>, info: UpdateInfo) {
+    let Ok(safe_url) = is_allowed_github_download_url(&info.download_url) else {
+        let _ = tx.send(UpdateEvent::Error {
+            message: "Update download blocked: untrusted URL".to_string(),
+            is_startup: false,
+        });
+        return;
+    };
+
+    let Some(expected_sha256) = info.sha256.as_deref() else {
+        let _ = tx.send(UpdateEvent::Error {
+            message: "Update blocked: missing SHA-256 checksum in release".to_string(),
+            is_startup: false,
+        });
+        return;
+    };
+
     let tmp_path = std::env::temp_dir().join("Rustify-Update-Setup.exe");
     let _ = fs::remove_file(&tmp_path);
 
@@ -415,7 +517,8 @@ fn run_download_worker(tx: Sender<UpdateEvent>, info: UpdateInfo) {
         "180",
         "-o",
         &tmp_path.to_string_lossy(),
-        &info.download_url,
+        "--",
+        safe_url,
     ])
     .stdout(Stdio::null())
     .stderr(Stdio::null());
@@ -459,22 +562,11 @@ fn run_download_worker(tx: Sender<UpdateEvent>, info: UpdateInfo) {
         return;
     }
 
-    // Validate downloaded installer size and PE MZ header
-    let valid_file = fs::metadata(&tmp_path)
-        .ok()
-        .filter(|m| m.is_file() && m.len() >= MIN_INSTALLER_BYTES)
-        .and_then(|_| fs::File::open(&tmp_path).ok())
-        .and_then(|mut f| {
-            let mut magic = [0u8; 2];
-            f.read_exact(&mut magic).ok()?;
-            Some(&magic == b"MZ")
-        })
-        .unwrap_or(false);
-
-    if !valid_file {
+    // Validate downloaded installer size, PE MZ header, and SHA-256 checksum
+    if !verify_installer_file(&tmp_path, expected_sha256) {
         let _ = fs::remove_file(&tmp_path);
         let _ = tx.send(UpdateEvent::Error {
-            message: "Downloaded installer verification failed".to_string(),
+            message: "Downloaded installer verification failed (size/header/SHA-256)".to_string(),
             is_startup: false,
         });
         return;
@@ -488,20 +580,12 @@ fn run_download_worker(tx: Sender<UpdateEvent>, info: UpdateInfo) {
         total_bytes: final_bytes.max(info.asset_size),
     });
 
-    // Launch detached installer after a brief delay so Rustify can exit cleanly first
-    let launch_cmd = format!(
-        "ping -n 2 127.0.0.1 >NUL & start \"\" \"{}\"",
-        tmp_path.display()
-    );
-    let mut launcher = Command::new("cmd");
+    // Launch installer directly without shell interpolation
+    let mut launcher = Command::new(&tmp_path);
     launcher
-        .args(["/C", &launch_cmd])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-
-    #[cfg(target_os = "windows")]
-    launcher.creation_flags(CREATE_NO_WINDOW);
 
     if launcher.spawn().is_err() {
         let _ = tx.send(UpdateEvent::Error {
@@ -511,9 +595,7 @@ fn run_download_worker(tx: Sender<UpdateEvent>, info: UpdateInfo) {
         return;
     }
 
-    let _ = tx.send(UpdateEvent::ReadyToInstall {
-        installed_size: info.asset_size,
-    });
+    let _ = tx.send(UpdateEvent::ReadyToInstall);
 }
 
 #[cfg(test)]
@@ -563,6 +645,46 @@ mod tests {
         assert_eq!(
             detect_update("1.2.0", "v1.1.0", 13_000_000, 14_000_000),
             None
+        );
+    }
+
+    #[test]
+    fn test_allowed_github_download_url() {
+        assert!(is_allowed_github_download_url(
+            "https://github.com/Ilay-dev/Rustify/releases/download/v1.3.0/Rustify-Setup.exe"
+        )
+        .is_ok());
+        assert!(is_allowed_github_download_url(
+            "https://objects.githubusercontent.com/github-production-release-asset/foo.exe"
+        )
+        .is_ok());
+        assert!(is_allowed_github_download_url(
+            "https://release-assets.githubusercontent.com/github-production-release-asset/foo.exe"
+        )
+        .is_ok());
+        assert!(is_allowed_github_download_url("https://evil.com/Rustify-Setup.exe").is_err());
+        assert!(is_allowed_github_download_url("http://github.com/foo.exe").is_err());
+        assert!(is_allowed_github_download_url("-o evil.exe").is_err());
+    }
+
+    #[test]
+    fn test_parse_sha256_digest() {
+        let valid = serde_json::json!({
+            "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789ABCDEF"
+        });
+        assert_eq!(
+            parse_sha256_digest(&valid),
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string())
+        );
+        let missing = serde_json::json!({"name": "Rustify-Setup.exe"});
+        assert_eq!(parse_sha256_digest(&missing), None);
+        let bad = serde_json::json!({"digest": "sha256:short"});
+        assert_eq!(parse_sha256_digest(&bad), None);
+        assert_eq!(
+            parse_sha256_from_body(
+                "Release notes\nSHA-256: FEDCBA9876543210FEDCBA9876543210FEDCBA9876543210FEDCBA9876543210"
+            ),
+            Some("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string())
         );
     }
 }

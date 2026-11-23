@@ -31,7 +31,7 @@ impl StereoCrossover {
         let omega = 2.0 * PI * cutoff_hz / sample_rate.max(8000.0);
         let sin_w = omega.sin();
         let cos_w = omega.cos();
-        let q = 0.70710678f32; // Butterworth Q
+        let q = std::f32::consts::FRAC_1_SQRT_2; // Butterworth Q
         let alpha = sin_w / (2.0 * q);
         let a0 = 1.0 + alpha;
         Self {
@@ -1156,6 +1156,36 @@ impl AudioEngine {
                     st.recompute_plan();
                 }
             }
+            AudioCommand::MigrateTrackPath { old_path, new_path } => {
+                let mut st = self.state.lock();
+                if let Some(ref mut da) = st.deck_a {
+                    if da.spec.path == old_path {
+                        da.spec.path = new_path.clone();
+                    }
+                }
+                if let Some(ref mut db) = st.deck_b {
+                    if db.spec.path == old_path {
+                        db.spec.path = new_path.clone();
+                    }
+                }
+                if let Some((ref mut pre, _)) = st.preloaded_next {
+                    if pre.path == old_path {
+                        pre.path = new_path;
+                    }
+                }
+            }
+            AudioCommand::InvalidatePreload(path) => {
+                let mut st = self.state.lock();
+                if st
+                    .preloaded_next
+                    .as_ref()
+                    .is_some_and(|(spec, _)| spec.path == path)
+                {
+                    st.preloaded_next = None;
+                    st.planned_mix = None;
+                    st.recompute_plan();
+                }
+            }
             AudioCommand::SetPlaying(p) => {
                 let mut st = self.state.lock();
                 if st.deck_a.is_some() {
@@ -1214,8 +1244,8 @@ impl AudioEngine {
     pub fn copy_recent_mono_4096(&self, out: &mut [f32; 4096]) -> (u32, bool) {
         let st = self.state.lock();
         let w = st.scope_write;
-        for i in 0..4096 {
-            out[i] = st.scope_ring[(w + i) & 4095];
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = st.scope_ring[(w + i) & 4095];
         }
         (st.sample_rate, st.is_playing)
     }
@@ -1225,8 +1255,8 @@ impl AudioEngine {
         let snap_base = {
             let st = self.state.lock();
             let w = st.scope_write;
-            for i in 0..512 {
-                scope[i] = st.scope_ring[(w + 4096 - 512 + i) & 4095];
+            for (i, slot) in scope.iter_mut().enumerate() {
+                *slot = st.scope_ring[(w + 4096 - 512 + i) & 4095];
             }
             let (current_path, pos, dur) = if let Some(ref da) = st.deck_a {
                 (
@@ -1303,8 +1333,7 @@ impl AudioEngine {
         // Compute fast 16-band logarithmic spectrum on UI thread from 512-sample ring (<0.02ms)
         let mut snap = snap_base;
         if snap.is_playing {
-            for i in 0..512 {
-                let sample = scope[i];
+            for (i, &sample) in scope.iter().enumerate() {
                 let w = 0.5 * (1.0 - (2.0 * PI * i as f32 / 511.0).cos());
                 self.fft_buf[i] = Complex::new(sample * w, 0.0);
             }

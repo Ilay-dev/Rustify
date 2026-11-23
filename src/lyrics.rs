@@ -145,6 +145,43 @@ impl LyricsManager {
         ));
     }
 
+    pub fn migrate_track_path(&mut self, old_path: &Path, new_path: &Path) {
+        let old_cache = lyrics_cache_path(old_path);
+        let new_cache = lyrics_cache_path(new_path);
+        if old_cache != new_cache && old_cache.is_file() {
+            if !new_cache.is_file() {
+                if let Some(parent) = new_cache.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                if fs::rename(&old_cache, &new_cache).is_err()
+                    && fs::copy(&old_cache, &new_cache).is_ok()
+                {
+                    let _ = fs::remove_file(&old_cache);
+                }
+            } else {
+                let _ = fs::remove_file(&old_cache);
+            }
+        }
+        if let Some(entry) = self.cache.remove(old_path) {
+            self.cache.insert(new_path.to_path_buf(), entry);
+        }
+        if self.in_flight.remove(old_path) {
+            self.in_flight.insert(new_path.to_path_buf());
+        }
+        if self.last_track_path.as_deref() == Some(old_path) {
+            self.last_track_path = Some(new_path.to_path_buf());
+        }
+    }
+
+    pub fn invalidate(&mut self, track_path: &Path) {
+        self.cache.remove(track_path);
+        self.in_flight.remove(track_path);
+        if self.last_track_path.as_deref() == Some(track_path) {
+            self.last_track_path = None;
+            self.last_active_idx = None;
+        }
+    }
+
     pub fn active_lines_for(
         &self,
         track_path: &Path,
@@ -266,6 +303,7 @@ fn strip_search_tags(raw: &str) -> String {
 }
 
 fn curl_get_json(url: &str) -> Option<serde_json::Value> {
+    let safe_url = crate::config::validate_http_url(url).ok()?;
     #[cfg(target_os = "windows")]
     let program = "curl.exe";
     #[cfg(not(target_os = "windows"))]
@@ -278,7 +316,7 @@ fn curl_get_json(url: &str) -> Option<serde_json::Value> {
     }
 
     let output = cmd
-        .args(["-s", "-L", "--max-time", "8", "-A", "Rustify/1.0", url])
+        .args(["-s", "-L", "--max-time", "8", "-A", "Rustify/1.0", "--", safe_url])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()

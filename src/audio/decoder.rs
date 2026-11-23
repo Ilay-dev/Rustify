@@ -70,11 +70,10 @@ pub fn probe_track_info(path: &Path) -> ProbeInfo {
             if sr <= 0.0 {
                 return None;
             }
-            if let Some(n_frames) = track.codec_params.n_frames {
-                Some((n_frames as f64 / sr) as f32)
-            } else {
-                None
-            }
+            track
+                .codec_params
+                .n_frames
+                .map(|n_frames| (n_frames as f64 / sr) as f32)
         });
 
     ProbeInfo {

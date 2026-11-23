@@ -195,8 +195,8 @@ impl CaptureRing {
 
     fn copy_recent_4096(&self, out: &mut [f32; 4096]) -> u32 {
         let w = self.write_idx;
-        for i in 0..4096 {
-            out[i] = self.ring[(w + i) & 4095];
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = self.ring[(w + i) & 4095];
         }
         self.sample_rate
     }
@@ -777,8 +777,10 @@ fn draw_visualizer_lyrics(
     let next_col = rgba(210, 214, 224, 152);
 
     let make_galley = |text: &str, font: egui::FontId, color: Color32| {
-        let mut job = egui::text::LayoutJob::default();
-        job.halign = egui::Align::Center;
+        let mut job = egui::text::LayoutJob {
+            halign: egui::Align::Center,
+            ..Default::default()
+        };
         job.wrap.max_width = max_w;
         job.append(
             text,

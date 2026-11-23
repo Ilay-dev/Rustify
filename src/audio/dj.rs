@@ -171,7 +171,7 @@ pub fn plan_dj_crossfade(
     };
 
     // 3. Snap crossfade duration to an exact integer number of 4-beat bars (Takte)
-    let max_safe_fade = (out_dur * 0.30).min(in_dur * 0.30).min(16.0).max(2.5);
+    let max_safe_fade = (out_dur * 0.30).min(in_dur * 0.30).clamp(2.5, 16.0);
     let desired = settings.crossfade_secs.clamp(3.0, max_safe_fade);
 
     let fade_dur = if let Some(a) = out_analysis {

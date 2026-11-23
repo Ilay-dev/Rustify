@@ -135,7 +135,7 @@ pub fn scan_library(music_dir: &Path) -> Vec<Playlist> {
         }
     }
 
-    playlists.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    playlists.sort_by_key(|a| a.name.to_lowercase());
     playlists
 }
 
@@ -176,7 +176,7 @@ pub fn scan_playlist_dir(dir: &Path, playlist_name: &str) -> Vec<Track> {
         });
     }
 
-    tracks.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+    tracks.sort_by_key(|a| a.title.to_lowercase());
     tracks
 }
 
@@ -191,14 +191,48 @@ pub fn sanitize_filename_component(input: &str) -> String {
             c => c,
         })
         .collect();
-    // Collapse multiple whitespace
-    cleaned
+    // Collapse multiple whitespace and strip leading/trailing dots & whitespace
+    let collapsed = cleaned
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-        .trim_end_matches('.')
-        .trim()
-        .to_string()
+        .trim_matches(|c: char| c == '.' || c.is_whitespace())
+        .to_string();
+    if collapsed.is_empty() {
+        return String::new();
+    }
+    let base = collapsed.split('.').next().unwrap_or(&collapsed);
+    let upper = base.to_ascii_uppercase();
+    let is_reserved = matches!(
+        upper.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    );
+    if is_reserved {
+        format!("_{collapsed}")
+    } else {
+        collapsed
+    }
 }
 
 pub fn create_playlist(music_dir: &Path, raw_name: &str) -> Result<PathBuf, String> {
@@ -338,7 +372,7 @@ pub fn import_pc_folder_as_playlist(
     if source_folder == target_dir
         || (src_canon.is_some() && src_canon == target_canon)
     {
-        let _ = fs::write(&target_dir.join(".rustify-playlist"), b"rustify");
+        let _ = fs::write(target_dir.join(".rustify-playlist"), b"rustify");
         return Ok((clean_name, audio_files.len()));
     }
 
@@ -397,5 +431,22 @@ pub fn reveal_in_explorer(path: &Path) {
     #[cfg(not(target_os = "windows"))]
     {
         let _ = path;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_filename_component() {
+        assert_eq!(sanitize_filename_component("..hello.."), "hello");
+        assert_eq!(sanitize_filename_component(".hidden"), "hidden");
+        assert_eq!(sanitize_filename_component("..."), "");
+        assert_eq!(sanitize_filename_component("con"), "_con");
+        assert_eq!(sanitize_filename_component("NUL.txt"), "_NUL.txt");
+        assert_eq!(sanitize_filename_component("lpt9"), "_lpt9");
+        assert_eq!(sanitize_filename_component("COM1"), "_COM1");
+        assert_eq!(sanitize_filename_component("Track: Name?"), "Track Name");
     }
 }

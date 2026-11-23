@@ -135,11 +135,11 @@ fn analyze_mono_pcm(
     // 500ms (10-block) moving average so transient dips don't fool phrase boundary detection
     let n_blocks = rms_blocks.len();
     let mut smooth_rms = vec![0.0f32; n_blocks];
-    for i in 0..n_blocks {
+    for (i, slot) in smooth_rms.iter_mut().enumerate() {
         let lo = i.saturating_sub(5);
         let hi = (i + 5).min(n_blocks);
         let sum: f32 = rms_blocks[lo..hi].iter().sum();
-        smooth_rms[i] = sum / (hi - lo).max(1) as f32;
+        *slot = sum / (hi - lo).max(1) as f32;
     }
 
     let mut sorted_rms = smooth_rms.clone();
@@ -209,7 +209,7 @@ fn analyze_mono_pcm(
     if let Some(bt) = tracker {
         if let Ok(bt_res) = bt.analyze_audio(mono, sr) {
             if let Some(raw_bpm) = calculate_bpm(&bt_res) {
-                if raw_bpm >= 50.0 && raw_bpm <= 240.0 && bt_res.beats.len() >= 4 {
+                if (50.0..=240.0).contains(&raw_bpm) && bt_res.beats.len() >= 4 {
                     let mut bpm = raw_bpm;
                     let nearest_int = bpm.round();
                     if (bpm - nearest_int).abs() < 0.22 {
@@ -528,7 +528,7 @@ fn analyze_mono_pcm(
     let mut idx_b = 0usize;
     while t_b < duration_sec {
         synth_beats.push(t_b);
-        if idx_b % 4 == 0 {
+        if idx_b.is_multiple_of(4) {
             synth_downbeats.push(t_b);
         }
         t_b += period_sec;
@@ -564,10 +564,10 @@ fn measure_lufs_and_norm_gain(mono: &[f32], sr: u32) -> (f32, f32) {
 
     let fs = (sr as f64).max(8000.0);
 
-    // Stage 1: RBJ High-Shelf +4.0 dB at 1500.0 Hz, Q = 0.7071
+    // Stage 1: RBJ High-Shelf +4.0 dB at 1500.0 Hz, Q = 1/sqrt(2)
     let (s1_b0, s1_b1, s1_b2, s1_a1, s1_a2) = {
         let f0 = 1500.0_f64.min(fs * 0.45);
-        let q = 0.7071_f64;
+        let q = std::f64::consts::FRAC_1_SQRT_2;
         let a = 10.0_f64.powf(4.0 / 40.0);
         let w0 = 2.0 * std::f64::consts::PI * f0 / fs;
         let cos_w0 = w0.cos();
@@ -1000,6 +1000,25 @@ impl BpmManager {
             Some(entry.analysis.clone())
         } else {
             None
+        }
+    }
+
+    pub fn migrate_track_path(&mut self, old_path: &Path, new_path: &Path) {
+        let old_key = normalize_path_key(old_path);
+        let new_key = normalize_path_key(new_path);
+        if old_key != new_key {
+            if let Some(entry) = self.cache.entries.remove(&old_key) {
+                self.cache.entries.insert(new_key, entry);
+                self.dirty_since_save += 1;
+            }
+        }
+    }
+
+    pub fn remove_track(&mut self, path: &Path) {
+        let key = normalize_path_key(path);
+        self.in_flight.remove(&key);
+        if self.cache.entries.remove(&key).is_some() {
+            self.dirty_since_save += 1;
         }
     }
 

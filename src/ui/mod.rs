@@ -13,8 +13,8 @@ use crate::audio::bpm::BpmManager;
 use crate::audio::dj::build_dj_sorted_indices;
 use crate::audio::engine::AudioEngine;
 use crate::audio::{AudioCommand, AudioTrackSpec, DjSettings, EngineSnapshot};
-use crate::config::{AppConfig, PlaybackMode, RepeatMode};
-use crate::covers::{set_custom_cover, CoverManager};
+use crate::config::{normalize_path_key, AppConfig, PlaybackMode, RepeatMode};
+use crate::covers::{migrate_cover_on_rename, set_custom_cover, CoverManager};
 use crate::discord_rpc::{DiscordRpcManager, RpcTrackInfo};
 use crate::i18n::{tr, Language};
 use crate::library::{
@@ -425,14 +425,19 @@ impl RustifyApp {
             return;
         }
 
-        tracks.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+        tracks.sort_by_key(|a| a.title.to_lowercase());
         self.build_queue_from_tracks(&tracks, current_path.as_deref());
         self.sync_next_preload();
     }
 
     fn peek_next_path(&self) -> (Option<PathBuf>, bool) {
         if self.config.repeat_mode == RepeatMode::One {
-            return (self.play_queue.get(self.queue_pos).cloned(), false);
+            let cur = self
+                .snap
+                .current_path
+                .clone()
+                .or_else(|| self.play_queue.get(self.queue_pos).cloned());
+            return (cur, false);
         }
         if let Some(uq) = self.user_queue.front() {
             return (Some(uq.clone()), true);
@@ -475,6 +480,7 @@ impl RustifyApp {
         let Some(spec) = self.make_track_spec(&path) else {
             return;
         };
+        self.snap.current_path = Some(path.clone());
         let (next_path, from_uq) = self.peek_next_path();
         self.next_came_from_user_queue = from_uq;
         let next_spec = next_path.as_deref().and_then(|p| self.make_track_spec(p));
@@ -496,7 +502,12 @@ impl RustifyApp {
 
     fn play_next(&mut self, allow_dj_fade: bool) {
         if !allow_dj_fade && self.config.repeat_mode == RepeatMode::One {
-            if let Some(path) = self.play_queue.get(self.queue_pos).cloned() {
+            if let Some(path) = self
+                .snap
+                .current_path
+                .clone()
+                .or_else(|| self.play_queue.get(self.queue_pos).cloned())
+            {
                 if let Some(spec) = self.make_track_spec(&path) {
                     let (next_path, from_uq) = self.peek_next_path();
                     self.next_came_from_user_queue = from_uq;
@@ -511,8 +522,9 @@ impl RustifyApp {
             }
         }
 
-        if let Some(uq_path) = self.user_queue.pop_front() {
+        while let Some(uq_path) = self.user_queue.pop_front() {
             if let Some(spec) = self.make_track_spec(&uq_path) {
+                self.snap.current_path = Some(uq_path);
                 let (next_path, from_uq) = self.peek_next_path();
                 self.next_came_from_user_queue = from_uq;
                 let next_spec = next_path.as_deref().and_then(|p| self.make_track_spec(p));
@@ -532,50 +544,57 @@ impl RustifyApp {
                         mode: self.config.playback_mode,
                     });
                 }
+                return;
             }
-            return;
         }
 
         if self.play_queue.is_empty() {
             return;
         }
 
-        let next_idx = if self.queue_pos + 1 < self.play_queue.len() {
-            Some(self.queue_pos + 1)
-        } else if self.config.repeat_mode == RepeatMode::All {
-            Some(0)
-        } else {
-            None
-        };
-
-        let Some(idx) = next_idx else {
-            self.engine.send(AudioCommand::Stop);
-            return;
-        };
-
-        self.queue_pos = idx;
-        let path = self.play_queue[idx].clone();
-        if let Some(spec) = self.make_track_spec(&path) {
-            let (next_path, from_uq) = self.peek_next_path();
-            self.next_came_from_user_queue = from_uq;
-            let next_spec = next_path.as_deref().and_then(|p| self.make_track_spec(p));
-            if allow_dj_fade
-                && self.config.playback_mode == PlaybackMode::DjMix
-                && self.snap.is_playing
-            {
-                self.engine.send(AudioCommand::CrossfadeTo {
-                    track: spec,
-                    next: next_spec,
-                    mode: self.config.playback_mode,
-                });
+        let mut idx = self.queue_pos;
+        for _ in 0..self.play_queue.len() {
+            let next_idx = if idx + 1 < self.play_queue.len() {
+                Some(idx + 1)
+            } else if self.config.repeat_mode == RepeatMode::All {
+                Some(0)
             } else {
-                self.engine.send(AudioCommand::PlayNow {
-                    track: spec,
-                    next: next_spec,
-                    mode: self.config.playback_mode,
-                });
+                None
+            };
+
+            let Some(candidate_idx) = next_idx else {
+                self.engine.send(AudioCommand::Stop);
+                return;
+            };
+
+            idx = candidate_idx;
+            let path = self.play_queue[idx].clone();
+            if let Some(spec) = self.make_track_spec(&path) {
+                self.queue_pos = idx;
+                self.snap.current_path = Some(path);
+                let (next_path, from_uq) = self.peek_next_path();
+                self.next_came_from_user_queue = from_uq;
+                let next_spec = next_path.as_deref().and_then(|p| self.make_track_spec(p));
+                if allow_dj_fade
+                    && self.config.playback_mode == PlaybackMode::DjMix
+                    && self.snap.is_playing
+                {
+                    self.engine.send(AudioCommand::CrossfadeTo {
+                        track: spec,
+                        next: next_spec,
+                        mode: self.config.playback_mode,
+                    });
+                } else {
+                    self.engine.send(AudioCommand::PlayNow {
+                        track: spec,
+                        next: next_spec,
+                        mode: self.config.playback_mode,
+                    });
+                }
+                return;
             }
         }
+        self.engine.send(AudioCommand::Stop);
     }
 
     fn play_prev(&mut self) {
@@ -586,26 +605,37 @@ impl RustifyApp {
         if self.play_queue.is_empty() {
             return;
         }
-        if self.queue_pos > 0 {
-            self.queue_pos -= 1;
-        } else if self.config.repeat_mode == RepeatMode::All {
-            self.queue_pos = self.play_queue.len().saturating_sub(1);
-        } else {
-            self.engine.send(AudioCommand::Seek(0.0));
-            return;
-        }
+        let mut idx = self.queue_pos;
+        for _ in 0..self.play_queue.len() {
+            let prev_idx = if idx > 0 {
+                Some(idx - 1)
+            } else if self.config.repeat_mode == RepeatMode::All {
+                Some(self.play_queue.len().saturating_sub(1))
+            } else {
+                None
+            };
+            let Some(candidate_idx) = prev_idx else {
+                self.engine.send(AudioCommand::Seek(0.0));
+                return;
+            };
 
-        let path = self.play_queue[self.queue_pos].clone();
-        if let Some(spec) = self.make_track_spec(&path) {
-            let (next_path, from_uq) = self.peek_next_path();
-            self.next_came_from_user_queue = from_uq;
-            let next_spec = next_path.as_deref().and_then(|p| self.make_track_spec(p));
-            self.engine.send(AudioCommand::PlayNow {
-                track: spec,
-                next: next_spec,
-                mode: self.config.playback_mode,
-            });
+            idx = candidate_idx;
+            let path = self.play_queue[idx].clone();
+            if let Some(spec) = self.make_track_spec(&path) {
+                self.queue_pos = idx;
+                self.snap.current_path = Some(path);
+                let (next_path, from_uq) = self.peek_next_path();
+                self.next_came_from_user_queue = from_uq;
+                let next_spec = next_path.as_deref().and_then(|p| self.make_track_spec(p));
+                self.engine.send(AudioCommand::PlayNow {
+                    track: spec,
+                    next: next_spec,
+                    mode: self.config.playback_mode,
+                });
+                return;
+            }
         }
+        self.engine.send(AudioCommand::Stop);
     }
 
     fn poll_background_events(&mut self) {
@@ -1256,9 +1286,40 @@ impl RustifyApp {
         if let Some((path, title, artist)) = save_req {
             match rename_track(&path, &title, &artist) {
                 Ok(new_path) => {
+                    migrate_cover_on_rename(&path, &new_path);
+                    self.covers.invalidate(&path);
+                    self.covers.invalidate(&new_path);
+                    self.lyrics_mgr.migrate_track_path(&path, &new_path);
+
+                    let old_fav = normalize_path_key(&path);
+                    if self.config.favorites.remove(&old_fav) {
+                        self.config.favorites.insert(normalize_path_key(&new_path));
+                        self.config.save();
+                    }
+
+                    for p in &mut self.play_queue {
+                        if *p == path {
+                            *p = new_path.clone();
+                        }
+                    }
+                    for p in &mut self.user_queue {
+                        if *p == path {
+                            *p = new_path.clone();
+                        }
+                    }
+                    if self.snap.current_path.as_ref() == Some(&path) {
+                        self.snap.current_path = Some(new_path.clone());
+                    }
+                    self.bpm.migrate_track_path(&path, &new_path);
+                    self.engine.send(AudioCommand::MigrateTrackPath {
+                        old_path: path,
+                        new_path: new_path.clone(),
+                    });
+
                     self.rename_dialog = None;
                     self.reload_library();
                     self.bpm.enqueue_if_needed(&new_path);
+                    self.sync_next_preload();
                     self.show_toast(s.toast_renamed);
                 }
                 Err(e) => {
@@ -1326,6 +1387,35 @@ impl RustifyApp {
                 self.engine.send(AudioCommand::Stop);
             }
             if delete_track(&path).is_ok() {
+                let mut removed_before_pos = 0usize;
+                let mut idx = 0usize;
+                self.play_queue.retain(|p| {
+                    let keep = p != &path;
+                    if !keep && idx < self.queue_pos {
+                        removed_before_pos += 1;
+                    }
+                    idx += 1;
+                    keep
+                });
+                self.queue_pos = self.queue_pos.saturating_sub(removed_before_pos);
+                if self.play_queue.is_empty() {
+                    self.queue_pos = 0;
+                } else if self.queue_pos >= self.play_queue.len() {
+                    self.queue_pos = self.play_queue.len() - 1;
+                }
+
+                self.user_queue.retain(|p| p != &path);
+
+                let fav_key = normalize_path_key(&path);
+                if self.config.favorites.remove(&fav_key) {
+                    self.config.save();
+                }
+
+                self.covers.invalidate(&path);
+                self.lyrics_mgr.invalidate(&path);
+                self.bpm.remove_track(&path);
+                self.engine.send(AudioCommand::InvalidatePreload(path));
+                self.sync_next_preload();
                 self.reload_library();
                 self.show_toast(s.toast_deleted);
             }
@@ -1926,6 +2016,7 @@ impl RustifyApp {
                 self.queue_pos = pos;
             }
             if let Some(spec) = self.make_track_spec(&path) {
+                self.snap.current_path = Some(path);
                 let (next_path, from_uq) = self.peek_next_path();
                 self.next_came_from_user_queue = from_uq;
                 let next_spec = next_path.as_deref().and_then(|p| self.make_track_spec(p));

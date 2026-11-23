@@ -321,6 +321,11 @@ pub enum AudioCommand {
         path: PathBuf,
         analysis: TrackAnalysis,
     },
+    MigrateTrackPath {
+        old_path: PathBuf,
+        new_path: PathBuf,
+    },
+    InvalidatePreload(PathBuf),
     SetPlaying(bool),
     TogglePlay,
     Seek(f32),

@@ -297,7 +297,7 @@ pub fn show_settings_modal(
         if glass_pill_button(
             &mut r_ui,
             None,
-            if is_de { "Reset" } else { "Reset" },
+            "Reset",
             24.0,
             false,
         )
