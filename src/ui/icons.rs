@@ -551,36 +551,37 @@ pub fn draw_icon(painter: &Painter, center: Pos2, size: f32, icon: Icon, color: 
             }
         }
         Icon::Lyrics => {
-            // Minimalist microphone icon
-            let head = Rect::from_center_size(
-                Pos2::new(center.x, center.y - r * 0.24),
-                Vec2::new(r * 0.56, r * 0.84),
+            // Minimalist rounded lyric speech-bubble with crisp text lines
+            let bubble = Rect::from_center_size(
+                Pos2::new(center.x, center.y - r * 0.12),
+                Vec2::new(r * 1.44, r * 1.08),
             );
             painter.rect_stroke(
-                head,
-                CornerRadius::same((r * 0.28).round().max(2.0) as u8),
+                bubble,
+                CornerRadius::same((r * 0.30).round().max(2.0) as u8),
                 stroke,
                 egui::StrokeKind::Inside,
             );
-            draw_arc(
-                painter,
-                Pos2::new(center.x, center.y - r * 0.14),
-                r * 0.50,
-                0.12,
-                PI - 0.12,
+            painter.add(Shape::line(
+                vec![
+                    Pos2::new(center.x - r * 0.34, bubble.bottom()),
+                    Pos2::new(center.x - r * 0.50, center.y + r * 0.68),
+                    Pos2::new(center.x - r * 0.08, bubble.bottom()),
+                ],
                 stroke,
-            );
+            ));
+            let line_l = bubble.left() + r * 0.28;
             painter.line_segment(
                 [
-                    Pos2::new(center.x, center.y + r * 0.36),
-                    Pos2::new(center.x, center.y + r * 0.72),
+                    Pos2::new(line_l, bubble.center().y - r * 0.16),
+                    Pos2::new(bubble.right() - r * 0.28, bubble.center().y - r * 0.16),
                 ],
                 stroke,
             );
             painter.line_segment(
                 [
-                    Pos2::new(center.x - r * 0.30, center.y + r * 0.72),
-                    Pos2::new(center.x + r * 0.30, center.y + r * 0.72),
+                    Pos2::new(line_l, bubble.center().y + r * 0.16),
+                    Pos2::new(bubble.right() - r * 0.48, bubble.center().y + r * 0.16),
                 ],
                 stroke,
             );

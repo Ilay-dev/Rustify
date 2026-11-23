@@ -54,8 +54,12 @@
 - Supports one-click in-app download with live progress and seamless installer launch, plus manual update checks directly from **Settings**.
 
 ### Synchronized Lyrics (LRCLIB)
-- Click the microphone icon in the player bar to open the Liquid Glass karaoke lyrics view.
+- Click the **Lyrics** speech-bubble icon in the player bar to open the Liquid Glass karaoke lyrics view.
 - Automatically fetches synchronized `.lrc` lyrics via `lrclib.net`, caches them locally, highlights & auto-scrolls the current line, and lets you **click any line to seek** directly to that moment.
+
+<p align="center">
+  <img src="docs/preview_lyrics.png" alt="Rustify Synchronized Karaoke Lyrics View" width="85%" />
+</p>
 
 ### Built-in AudioVisualizer Window
 - Native pure-Rust port of [AudioVisualizer](https://ilay-dev.github.io/AudioVizuallizer/) in a dedicated secondary window (`F` or double-click for fullscreen, `Space` to pause).
@@ -64,7 +68,11 @@
   - **System Audio (Desktop)** — Windows WASAPI loopback for all desktop audio
   - **Microphone** — live microphone / line-in capture
 - Live customization directly in the left sidebar while open (*Classic*, *Neon Pulse*, *Ocean Waves*, *Custom* colors, thickness, trail delay, shape, and frequency scale).
-- **Live 3-Line Synchronized Lyrics Overlay**: displays the previous, current, and upcoming lyric lines right inside the AudioVisualizer window with a toggle and **Top / Bottom** positioning directly in the sidebar.
+- **Live 3-Line Synchronized Lyrics Overlay**: displays the previous, current, and upcoming lyric lines centered inside the AudioVisualizer window (previous & next lines smaller in soft gray, active line crisp & bright) with a toggle and **Top / Bottom** positioning directly in the sidebar.
+
+<p align="center">
+  <img src="docs/preview_visualizer_lyrics.png" alt="Rustify AudioVisualizer with Live 3-Line Synchronized Lyrics" width="85%" />
+</p>
 
 ### Local Library, Covers & System Integration
 - Supports **MP3, FLAC, WAV, OGG, M4A, and AAC**.
