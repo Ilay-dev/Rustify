@@ -78,6 +78,70 @@ pub fn install_fonts_and_style(ctx: &Context) {
         }
     }
 
+    // Load clean system sans-serif fonts on Linux (Arch, Ubuntu, Linux Mint)
+    #[cfg(target_os = "linux")]
+    {
+        let regular_candidates = [
+            "/usr/share/fonts/TTF/Inter-Regular.ttf",
+            "/usr/share/fonts/truetype/inter/Inter-Regular.ttf",
+            "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+            "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        ];
+        let mut loaded_regular = false;
+        for p in regular_candidates {
+            if let Ok(bytes) = std::fs::read(p) {
+                fonts
+                    .font_data
+                    .insert("linux_ui".to_owned(), FontData::from_owned(bytes).into());
+                if let Some(fam) = fonts.families.get_mut(&FontFamily::Proportional) {
+                    fam.insert(0, "linux_ui".to_owned());
+                }
+                loaded_regular = true;
+                break;
+            }
+        }
+
+        let bold_candidates = [
+            "/usr/share/fonts/TTF/Inter-SemiBold.ttf",
+            "/usr/share/fonts/truetype/inter/Inter-SemiBold.ttf",
+            "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
+            "/usr/share/fonts/noto/NotoSans-SemiBold.ttf",
+            "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/liberation/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        ];
+        for p in bold_candidates {
+            if let Ok(bytes) = std::fs::read(p) {
+                fonts
+                    .font_data
+                    .insert("linux_sb".to_owned(), FontData::from_owned(bytes).into());
+                let mut chain = vec!["linux_sb".to_owned()];
+                if loaded_regular {
+                    chain.push("linux_ui".to_owned());
+                }
+                if let Some(prop) = fonts.families.get(&FontFamily::Proportional) {
+                    for f in prop {
+                        if !chain.contains(f) {
+                            chain.push(f.clone());
+                        }
+                    }
+                }
+                fonts
+                    .families
+                    .insert(FontFamily::Name("SemiBold".into()), chain);
+                break;
+            }
+        }
+    }
+
     if !fonts.families.contains_key(&FontFamily::Name("SemiBold".into())) {
         let fallback = fonts
             .families

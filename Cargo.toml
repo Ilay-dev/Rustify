@@ -1,6 +1,6 @@
 [package]
 name = "rustify"
-version = "1.3.0"
+version = "1.4.0"
 edition = "2021"
 description = "Rustify — Minimalist Liquid Glass Music Player with BPM DJ Mixing"
 
@@ -9,7 +9,7 @@ name = "Rustify"
 path = "src/main.rs"
 
 [dependencies]
-eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "accesskit"] }
+eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "accesskit", "x11", "wayland"] }
 egui = "0.31"
 egui_glow = "0.31"
 cpal = "0.15"

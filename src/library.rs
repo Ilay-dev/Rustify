@@ -430,7 +430,12 @@ pub fn reveal_in_explorer(path: &Path) {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = path;
+        let target = if path.is_dir() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        };
+        let _ = std::process::Command::new("xdg-open").arg(target).spawn();
     }
 }
 

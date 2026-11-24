@@ -32,6 +32,7 @@ pub enum UpdateReason {
 pub struct UpdateInfo {
     pub version: String,
     pub tag: String,
+    pub asset_name: String,
     pub download_url: String,
     pub html_url: String,
     pub asset_size: u64,
@@ -314,7 +315,60 @@ fn parse_sha256_from_body(body: &str) -> Option<String> {
     None
 }
 
-fn verify_installer_file(path: &Path, expected_sha256: &str) -> bool {
+fn curl_bin() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "curl.exe"
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "curl"
+    }
+}
+
+#[cfg(any(not(target_os = "windows"), test))]
+fn sanitize_asset_filename(raw_name: &str) -> String {
+    let base = Path::new(raw_name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let cleaned: String = base
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        .collect();
+    let trimmed = cleaned.trim_matches('.');
+    if trimmed.is_empty() || trimmed.contains("..") {
+        "rustify-update.tar.gz".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn expected_magic_for_asset(asset_name: &str) -> Option<&'static [u8]> {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = asset_name;
+        Some(b"MZ")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let lower = asset_name.to_ascii_lowercase();
+        if lower.ends_with(".deb") {
+            Some(b"!<arch>\n")
+        } else if lower.ends_with(".pkg.tar.zst") {
+            Some(&[0x28, 0xB5, 0x2F, 0xFD])
+        } else if lower.ends_with(".tar.gz") {
+            Some(&[0x1F, 0x8B])
+        } else {
+            None
+        }
+    }
+}
+
+fn verify_installer_file(path: &Path, asset_name: &str, expected_sha256: &str) -> bool {
+    let Some(magic) = expected_magic_for_asset(asset_name) else {
+        return false;
+    };
     let Ok(meta) = fs::metadata(path) else {
         return false;
     };
@@ -326,7 +380,8 @@ fn verify_installer_file(path: &Path, expected_sha256: &str) -> bool {
     };
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 65_536];
-    let mut checked_magic = false;
+    let mut header = [0u8; 16];
+    let mut header_len = 0usize;
     loop {
         let Ok(n) = file.read(&mut buf) else {
             return false;
@@ -334,20 +389,99 @@ fn verify_installer_file(path: &Path, expected_sha256: &str) -> bool {
         if n == 0 {
             break;
         }
-        if !checked_magic {
-            if n < 2 || &buf[..2] != b"MZ" {
+        if header_len < magic.len() {
+            let take = (magic.len() - header_len).min(n);
+            header[header_len..header_len + take].copy_from_slice(&buf[..take]);
+            header_len += take;
+            if header_len >= magic.len() && &header[..magic.len()] != magic {
                 return false;
             }
-            checked_magic = true;
         }
         hasher.update(&buf[..n]);
     }
-    if !checked_magic {
+    if header_len < magic.len() || &header[..magic.len()] != magic {
         return false;
     }
     let digest = hasher.finalize();
     let actual_hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
     actual_hex == expected_sha256.to_ascii_lowercase()
+}
+
+fn find_asset_matching<F>(
+    assets: &[serde_json::Value],
+    raw_body: &str,
+    predicate: F,
+) -> Option<(String, String, u64, Option<String>)>
+where
+    F: Fn(&str) -> bool,
+{
+    for asset in assets {
+        let name = asset.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let url = asset
+            .get("browser_download_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let size = asset.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+        if predicate(name) && !url.is_empty() {
+            let digest =
+                parse_sha256_digest(asset).or_else(|| parse_sha256_from_body(raw_body));
+            return Some((name.to_string(), url.to_string(), size, digest));
+        }
+    }
+    None
+}
+
+fn select_release_asset(
+    assets: &[serde_json::Value],
+    raw_body: &str,
+) -> Option<(String, String, u64, Option<String>)> {
+    #[cfg(target_os = "windows")]
+    {
+        find_asset_matching(assets, raw_body, |n| {
+            n.eq_ignore_ascii_case("Rustify-Setup.exe")
+        })
+        .or_else(|| {
+            find_asset_matching(assets, raw_body, |n| {
+                n.to_ascii_lowercase().ends_with(".exe")
+            })
+        })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if Path::new("/etc/arch-release").exists() {
+            find_asset_matching(assets, raw_body, |n| {
+                n.to_ascii_lowercase().ends_with(".pkg.tar.zst")
+            })
+            .or_else(|| {
+                find_asset_matching(assets, raw_body, |n| {
+                    n.to_ascii_lowercase().ends_with("linux-x86_64.tar.gz")
+                })
+            })
+        } else if Path::new("/etc/debian_version").exists() {
+            find_asset_matching(assets, raw_body, |n| {
+                n.to_ascii_lowercase().ends_with(".deb")
+            })
+            .or_else(|| {
+                find_asset_matching(assets, raw_body, |n| {
+                    n.to_ascii_lowercase().ends_with("linux-x86_64.tar.gz")
+                })
+            })
+        } else {
+            find_asset_matching(assets, raw_body, |n| {
+                n.to_ascii_lowercase().ends_with("linux-x86_64.tar.gz")
+            })
+            .or_else(|| {
+                find_asset_matching(assets, raw_body, |n| {
+                    n.to_ascii_lowercase().ends_with(".deb")
+                })
+            })
+            .or_else(|| {
+                find_asset_matching(assets, raw_body, |n| {
+                    n.to_ascii_lowercase().ends_with(".pkg.tar.zst")
+                })
+            })
+        }
+    }
 }
 
 fn run_check_worker(tx: Sender<UpdateEvent>, last_known_size: u64, is_startup: bool) {
@@ -359,7 +493,7 @@ fn run_check_worker(tx: Sender<UpdateEvent>, last_known_size: u64, is_startup: b
         return;
     };
 
-    let mut cmd = Command::new("curl.exe");
+    let mut cmd = Command::new(curl_bin());
     cmd.args([
         "-sSL",
         "--max-time",
@@ -416,43 +550,12 @@ fn run_check_worker(tx: Sender<UpdateEvent>, last_known_size: u64, is_startup: b
     let raw_body = json.get("body").and_then(|v| v.as_str()).unwrap_or("");
     let notes = clamp_release_notes(raw_body, 320);
 
-    let mut chosen_asset: Option<(String, u64, Option<String>)> = None;
-    if let Some(assets) = json.get("assets").and_then(|v| v.as_array()) {
-        // Prefer exact Rustify-Setup.exe first
-        for asset in assets {
-            let name = asset.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let url = asset
-                .get("browser_download_url")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let size = asset.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
-            if name.eq_ignore_ascii_case("Rustify-Setup.exe") && !url.is_empty() {
-                let digest =
-                    parse_sha256_digest(asset).or_else(|| parse_sha256_from_body(raw_body));
-                chosen_asset = Some((url.to_string(), size, digest));
-                break;
-            }
-        }
-        // Fallback to any .exe asset
-        if chosen_asset.is_none() {
-            for asset in assets {
-                let name = asset.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let url = asset
-                    .get("browser_download_url")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let size = asset.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
-                if name.to_ascii_lowercase().ends_with(".exe") && !url.is_empty() {
-                    let digest =
-                        parse_sha256_digest(asset).or_else(|| parse_sha256_from_body(raw_body));
-                    chosen_asset = Some((url.to_string(), size, digest));
-                    break;
-                }
-            }
-        }
-    }
+    let chosen_asset = json
+        .get("assets")
+        .and_then(|v| v.as_array())
+        .and_then(|assets| select_release_asset(assets, raw_body));
 
-    let (download_url, asset_size, sha256) = chosen_asset.unwrap_or_default();
+    let (asset_name, download_url, asset_size, sha256) = chosen_asset.unwrap_or_default();
     let version = tag.trim().trim_start_matches(['v', 'V']).to_string();
 
     if let Some(reason) = detect_update(CURRENT_VERSION, tag, asset_size, last_known_size) {
@@ -473,6 +576,7 @@ fn run_check_worker(tx: Sender<UpdateEvent>, last_known_size: u64, is_startup: b
         let info = UpdateInfo {
             version,
             tag: tag.to_string(),
+            asset_name,
             download_url,
             html_url,
             asset_size,
@@ -507,16 +611,27 @@ fn run_download_worker(tx: Sender<UpdateEvent>, info: UpdateInfo) {
         return;
     };
 
-    let tmp_path = std::env::temp_dir().join("Rustify-Update-Setup.exe");
-    let _ = fs::remove_file(&tmp_path);
+    #[cfg(target_os = "windows")]
+    let dest_path = std::env::temp_dir().join("Rustify-Update-Setup.exe");
 
-    let mut cmd = Command::new("curl.exe");
+    #[cfg(not(target_os = "windows"))]
+    let (safe_name, dest_path) = {
+        let safe_name = sanitize_asset_filename(&info.asset_name);
+        let dl_dir = dirs::download_dir().unwrap_or_else(std::env::temp_dir);
+        let _ = fs::create_dir_all(&dl_dir);
+        let dest = dl_dir.join(&safe_name);
+        (safe_name, dest)
+    };
+
+    let _ = fs::remove_file(&dest_path);
+
+    let mut cmd = Command::new(curl_bin());
     cmd.args([
         "-fSL",
         "--max-time",
         "180",
         "-o",
-        &tmp_path.to_string_lossy(),
+        &dest_path.to_string_lossy(),
         "--",
         safe_url,
     ])
@@ -541,7 +656,7 @@ fn run_download_worker(tx: Sender<UpdateEvent>, info: UpdateInfo) {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
             Ok(None) => {
-                let downloaded_bytes = fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0);
+                let downloaded_bytes = fs::metadata(&dest_path).map(|m| m.len()).unwrap_or(0);
                 let _ = tx.send(UpdateEvent::DownloadProgress {
                     downloaded_bytes,
                     total_bytes: info.asset_size,
@@ -554,7 +669,7 @@ fn run_download_worker(tx: Sender<UpdateEvent>, info: UpdateInfo) {
 
     let ok_exit = matches!(exit_status, Ok(st) if st.success());
     if !ok_exit {
-        let _ = fs::remove_file(&tmp_path);
+        let _ = fs::remove_file(&dest_path);
         let _ = tx.send(UpdateEvent::Error {
             message: "Update download failed".to_string(),
             is_startup: false,
@@ -562,9 +677,9 @@ fn run_download_worker(tx: Sender<UpdateEvent>, info: UpdateInfo) {
         return;
     }
 
-    // Validate downloaded installer size, PE MZ header, and SHA-256 checksum
-    if !verify_installer_file(&tmp_path, expected_sha256) {
-        let _ = fs::remove_file(&tmp_path);
+    // Validate downloaded installer size, platform magic header, and SHA-256 checksum
+    if !verify_installer_file(&dest_path, &info.asset_name, expected_sha256) {
+        let _ = fs::remove_file(&dest_path);
         let _ = tx.send(UpdateEvent::Error {
             message: "Downloaded installer verification failed (size/header/SHA-256)".to_string(),
             is_startup: false,
@@ -572,7 +687,7 @@ fn run_download_worker(tx: Sender<UpdateEvent>, info: UpdateInfo) {
         return;
     }
 
-    let final_bytes = fs::metadata(&tmp_path)
+    let final_bytes = fs::metadata(&dest_path)
         .map(|m| m.len())
         .unwrap_or(info.asset_size);
     let _ = tx.send(UpdateEvent::DownloadProgress {
@@ -580,19 +695,49 @@ fn run_download_worker(tx: Sender<UpdateEvent>, info: UpdateInfo) {
         total_bytes: final_bytes.max(info.asset_size),
     });
 
-    // Launch installer directly without shell interpolation
-    let mut launcher = Command::new(&tmp_path);
-    launcher
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        // Launch installer directly without shell interpolation
+        let mut launcher = Command::new(&dest_path);
+        launcher
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
 
-    if launcher.spawn().is_err() {
-        let _ = tx.send(UpdateEvent::Error {
-            message: "Failed to launch update installer".to_string(),
-            is_startup: false,
-        });
-        return;
+        if launcher.spawn().is_err() {
+            let _ = tx.send(UpdateEvent::Error {
+                message: "Failed to launch update installer".to_string(),
+                is_startup: false,
+            });
+            return;
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let lower = safe_name.to_ascii_lowercase();
+        let open_target: &Path = if lower.ends_with(".deb") {
+            &dest_path
+        } else {
+            dest_path.parent().unwrap_or(&dest_path)
+        };
+        let mut launcher = Command::new("xdg-open");
+        launcher
+            .arg(open_target)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        if launcher.spawn().is_err() {
+            let _ = tx.send(UpdateEvent::Error {
+                message: format!(
+                    "Update downloaded to {}, but failed to open via xdg-open",
+                    dest_path.display()
+                ),
+                is_startup: false,
+            });
+            return;
+        }
     }
 
     let _ = tx.send(UpdateEvent::ReadyToInstall);
@@ -685,6 +830,106 @@ mod tests {
                 "Release notes\nSHA-256: FEDCBA9876543210FEDCBA9876543210FEDCBA9876543210FEDCBA9876543210"
             ),
             Some("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string())
+        );
+    }
+
+    #[test]
+    fn test_sanitize_asset_filename() {
+        assert_eq!(
+            sanitize_asset_filename("rustify_1.4.0_amd64.deb"),
+            "rustify_1.4.0_amd64.deb"
+        );
+        assert_eq!(
+            sanitize_asset_filename("../../etc/evil.deb"),
+            "evil.deb"
+        );
+        assert_eq!(sanitize_asset_filename(".."), "rustify-update.tar.gz");
+        assert_eq!(sanitize_asset_filename(""), "rustify-update.tar.gz");
+    }
+
+    #[test]
+    fn test_verify_installer_file_magic_and_sha256() {
+        let (asset_name, magic): (&str, &[u8]) = {
+            #[cfg(target_os = "windows")]
+            {
+                ("Rustify-Setup.exe", b"MZ")
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                ("rustify_1.4.0_amd64.deb", b"!<arch>\n")
+            }
+        };
+
+        let mut payload = vec![0x42u8; MIN_INSTALLER_BYTES as usize + 128];
+        payload[..magic.len()].copy_from_slice(magic);
+
+        let digest = Sha256::digest(&payload);
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+
+        let tmp = std::env::temp_dir().join(format!(
+            "rustify_test_verify_{}_{}",
+            std::process::id(),
+            asset_name
+        ));
+        fs::write(&tmp, &payload).expect("write test installer");
+
+        assert!(verify_installer_file(&tmp, asset_name, &hex));
+        assert!(!verify_installer_file(
+            &tmp,
+            asset_name,
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        ));
+
+        // Corrupt magic header -> must fail even with matching sha256
+        payload[0] ^= 0xFF;
+        let bad_digest = Sha256::digest(&payload);
+        let bad_hex: String = bad_digest.iter().map(|b| format!("{b:02x}")).collect();
+        fs::write(&tmp, &payload).expect("write bad magic installer");
+        assert!(!verify_installer_file(&tmp, asset_name, &bad_hex));
+
+        let _ = fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_select_release_asset_for_current_os() {
+        let assets = vec![
+            serde_json::json!({
+                "name": "Rustify-Setup.exe",
+                "browser_download_url": "https://github.com/Ilay-dev/Rustify/releases/download/v1.4.0/Rustify-Setup.exe",
+                "size": 14_000_000u64,
+                "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            }),
+            serde_json::json!({
+                "name": "rustify_1.4.0_amd64.deb",
+                "browser_download_url": "https://github.com/Ilay-dev/Rustify/releases/download/v1.4.0/rustify_1.4.0_amd64.deb",
+                "size": 12_000_000u64,
+                "digest": "sha256:1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            }),
+            serde_json::json!({
+                "name": "rustify-1.4.0-1-x86_64.pkg.tar.zst",
+                "browser_download_url": "https://github.com/Ilay-dev/Rustify/releases/download/v1.4.0/rustify-1.4.0-1-x86_64.pkg.tar.zst",
+                "size": 11_000_000u64,
+                "digest": "sha256:2123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            }),
+            serde_json::json!({
+                "name": "rustify-1.4.0-linux-x86_64.tar.gz",
+                "browser_download_url": "https://github.com/Ilay-dev/Rustify/releases/download/v1.4.0/rustify-1.4.0-linux-x86_64.tar.gz",
+                "size": 12_500_000u64,
+                "digest": "sha256:3123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            }),
+        ];
+        let picked = select_release_asset(&assets, "");
+        assert!(picked.is_some());
+        let (name, _url, size, sha) = picked.unwrap();
+        assert!(size > 0);
+        assert!(sha.is_some());
+        #[cfg(target_os = "windows")]
+        assert_eq!(name, "Rustify-Setup.exe");
+        #[cfg(not(target_os = "windows"))]
+        assert!(
+            name.ends_with(".deb")
+                || name.ends_with(".pkg.tar.zst")
+                || name.ends_with("linux-x86_64.tar.gz")
         );
     }
 }

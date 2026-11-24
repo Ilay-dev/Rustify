@@ -13,6 +13,7 @@ mod updater;
 
 use crate::ui::RustifyApp;
 use egui::{IconData, ViewportBuilder};
+#[cfg(target_os = "windows")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::ffi::c_void;
 
@@ -63,6 +64,7 @@ fn apply_windows_dwm_styling(hwnd: *mut c_void) {
 fn main() -> eframe::Result<()> {
     let mut viewport = ViewportBuilder::default()
         .with_title("Rustify")
+        .with_app_id("rustify")
         .with_inner_size([1240.0, 780.0])
         .with_min_inner_size([340.0, 86.0])
         .with_decorations(false)
@@ -86,18 +88,20 @@ fn main() -> eframe::Result<()> {
         "Rustify",
         options,
         Box::new(|cc| {
+            #[cfg(target_os = "windows")]
             let hwnd = cc
                 .window_handle()
                 .ok()
                 .and_then(|wh| match wh.as_raw() {
                     RawWindowHandle::Win32(handle) => {
                         let ptr = handle.hwnd.get() as *mut c_void;
-                        #[cfg(target_os = "windows")]
                         apply_windows_dwm_styling(ptr);
                         Some(ptr)
                     }
                     _ => None,
                 });
+            #[cfg(not(target_os = "windows"))]
+            let hwnd: Option<*mut c_void> = None;
 
             Ok(Box::new(RustifyApp::new(cc, hwnd)))
         }),

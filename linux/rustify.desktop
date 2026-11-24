@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Rustify
+GenericName=Music Player
+Comment=Minimalist Dark Liquid-Glass Local Music Player & AI DJ Automixer
+Exec=rustify
+Icon=rustify
+Terminal=false
+Categories=AudioVideo;Audio;Player;Music;
+MimeType=audio/mpeg;audio/flac;audio/wav;audio/ogg;audio/mp4;audio/aac;
+StartupWMClass=rustify
+Keywords=music;player;audio;dj;mp3;flac;lyrics;visualizer;

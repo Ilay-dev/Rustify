@@ -1,0 +1,210 @@
+name: Linux Release & CI
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'GitHub Release tag to attach Linux packages to (e.g. v1.4.0)'
+        required: false
+        default: 'v1.4.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-test-ubuntu-mint:
+    name: Build, Test & Package (.deb + .tar.gz) on Ubuntu 22.04
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux build, GUI & validation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            libgtk-3-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libssl-dev \
+            libdbus-1-dev \
+            pkg-config \
+            xvfb \
+            libgl1-mesa-dri \
+            libegl1-mesa \
+            libgles2-mesa \
+            mesa-utils \
+            desktop-file-utils
+
+      - name: Install Rust stable toolchain with Clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Run Clippy (0 warnings)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run unit tests
+        run: cargo test --no-fail-fast
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Verify shared library linkage (ldd)
+        run: |
+          ldd target/release/Rustify
+          if ldd target/release/Rustify | grep -q "not found"; then
+            echo "ERROR: Unresolved shared library dependency detected!"
+            exit 1
+          fi
+
+      - name: Run headless Linux GUI smoke test (Xvfb + Mesa)
+        run: |
+          rm -f /tmp/rustify_linux_smoke.png
+          RUSTIFY_CAPTURE_VIEW=setup \
+          RUSTIFY_CAPTURE_PNG=/tmp/rustify_linux_smoke.png \
+          LIBGL_ALWAYS_SOFTWARE=1 \
+          xvfb-run -a -s "-screen 0 1280x800x24" \
+            timeout 30s ./target/release/Rustify
+          test -f /tmp/rustify_linux_smoke.png
+          SIZE=$(stat -c%s /tmp/rustify_linux_smoke.png)
+          echo "Ubuntu headless GUI screenshot size: ${SIZE} bytes"
+          test "${SIZE}" -gt 10240
+
+      - name: Build .deb package (Ubuntu 22.04/24.04 & Linux Mint 21/22)
+        run: bash linux/build-deb.sh
+
+      - name: Test installing .deb package & validate desktop entry
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ./dist/rustify_*_amd64.deb
+          which rustify
+          desktop-file-validate /usr/share/applications/rustify.desktop
+          test -f /usr/share/icons/hicolor/256x256/apps/rustify.png
+          ldd /usr/bin/rustify
+          if ldd /usr/bin/rustify | grep -q "not found"; then
+            echo "ERROR: Installed /usr/bin/rustify has missing libraries!"
+            exit 1
+          fi
+
+      - name: Build portable Linux tarball
+        run: bash linux/build-tarball.sh
+
+      - name: Upload Ubuntu/Mint & portable artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb-tarball
+          path: |
+            dist/*.deb
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  build-test-arch:
+    name: Build, Test & Package (.pkg.tar.zst) on Arch Linux
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Arch Linux build & runtime dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel \
+            rust \
+            alsa-lib \
+            gtk3 \
+            dbus \
+            libxkbcommon \
+            libglvnd \
+            curl \
+            hicolor-icon-theme \
+            pipewire-pulse \
+            xorg-server-xvfb \
+            mesa \
+            desktop-file-utils \
+            sudo \
+            git
+
+      - name: Create non-root builder user for makepkg
+        run: |
+          useradd -m -G wheel builder
+          echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
+          chmod 440 /etc/sudoers.d/builder
+          chown -R builder:builder "${GITHUB_WORKSPACE}"
+
+      - name: Run Clippy & unit tests on Arch Linux
+        run: |
+          su - builder -c "cd '${GITHUB_WORKSPACE}' && cargo clippy --all-targets -- -D warnings && cargo test --no-fail-fast"
+
+      - name: Build Arch Linux package (.pkg.tar.zst)
+        run: |
+          su - builder -c "cd '${GITHUB_WORKSPACE}' && bash linux/build-arch.sh"
+
+      - name: Install Arch package & run headless GUI smoke test
+        run: |
+          pacman -U --noconfirm dist/rustify-*-x86_64.pkg.tar.zst
+          which rustify
+          ldd /usr/bin/rustify
+          if ldd /usr/bin/rustify | grep -q "not found"; then
+            echo "ERROR: Installed /usr/bin/rustify has missing libraries on Arch!"
+            exit 1
+          fi
+          desktop-file-validate /usr/share/applications/rustify.desktop
+          test -f /usr/share/icons/hicolor/256x256/apps/rustify.png
+          rm -f /tmp/rustify_arch_smoke.png
+          su - builder -c "RUSTIFY_CAPTURE_VIEW=setup RUSTIFY_CAPTURE_PNG=/tmp/rustify_arch_smoke.png LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s '-screen 0 1280x800x24' timeout 30s /usr/bin/rustify"
+          test -f /tmp/rustify_arch_smoke.png
+          SIZE=$(stat -c%s /tmp/rustify_arch_smoke.png)
+          echo "Arch Linux headless GUI screenshot size: ${SIZE} bytes"
+          test "${SIZE}" -gt 10240
+
+      - name: Upload Arch Linux package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-arch-pkg
+          path: dist/*.pkg.tar.zst
+          if-no-files-found: error
+
+  publish-linux-assets:
+    name: Publish Linux Packages to GitHub Release
+    needs: [build-test-ubuntu-mint, build-test-arch]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Ubuntu/Mint & portable artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-deb-tarball
+          path: release-assets
+
+      - name: Download Arch Linux package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-arch-pkg
+          path: release-assets
+
+      - name: Upload Linux packages to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ "${EVENT_NAME}" == "push" ]]; then
+            TAG="${REF_NAME}"
+          else
+            TAG="${INPUT_TAG:-v1.4.0}"
+          fi
+          echo "Publishing Linux release assets to tag: ${TAG}"
+          ls -lh release-assets/
+          if ! gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --title "Rustify ${TAG}" --generate-notes
+          fi
+          gh release upload "${TAG}" release-assets/* --repo "${GITHUB_REPOSITORY}" --clobber

@@ -229,7 +229,10 @@ static DE: Strings = Strings {
     ctx_toggle_fav: "Favorit umschalten",
     ctx_rename: "Titel / Interpret bearbeiten",
     ctx_reanalyze_bpm: "BPM neu analysieren",
+    #[cfg(target_os = "windows")]
     ctx_reveal_explorer: "Im Explorer anzeigen",
+    #[cfg(not(target_os = "windows"))]
+    ctx_reveal_explorer: "Im Dateimanager anzeigen",
     ctx_delete: "Datei löschen",
 
     rename_title: "Titel bearbeiten",
@@ -362,7 +365,10 @@ static EN: Strings = Strings {
     ctx_toggle_fav: "Toggle Favorite",
     ctx_rename: "Edit Title / Artist",
     ctx_reanalyze_bpm: "Re-analyze BPM",
+    #[cfg(target_os = "windows")]
     ctx_reveal_explorer: "Show in Explorer",
+    #[cfg(not(target_os = "windows"))]
+    ctx_reveal_explorer: "Show in File Manager",
     ctx_delete: "Delete File",
 
     rename_title: "Edit Track",

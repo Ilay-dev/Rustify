@@ -5,7 +5,10 @@
 
   <p>
     <a href="https://github.com/Ilay-dev/Rustify/releases/latest">
-      <img src="https://img.shields.io/badge/Download-Rustify--Setup.exe-ffffff?style=for-the-badge&logo=windows&logoColor=000000" alt="Download Windows Installer" />
+      <img src="https://img.shields.io/badge/Windows-Rustify--Setup.exe-ffffff?style=for-the-badge&logo=windows&logoColor=000000" alt="Download Windows Installer" />
+    </a>
+    <a href="https://github.com/Ilay-dev/Rustify/releases/latest">
+      <img src="https://img.shields.io/badge/Linux-Arch%20%C2%B7%20Ubuntu%20%C2%B7%20Mint-1a1c22?style=for-the-badge&logo=linux&logoColor=ffffff" alt="Download Linux Packages" />
     </a>
     <img src="https://img.shields.io/badge/Language-Rust-0b0c0f?style=for-the-badge&logo=rust&logoColor=ffffff" alt="Pure Rust" />
     <img src="https://img.shields.io/badge/License-MIT-1a1c22?style=for-the-badge" alt="MIT License" />
@@ -65,7 +68,7 @@
 - Native pure-Rust port of [AudioVisualizer](https://ilay-dev.github.io/AudioVizuallizer/) in a dedicated secondary window (`F` or double-click for fullscreen, `Space` to pause).
 - **3 Live Audio Sources**:
   - **Rustify (Music App)** — lossless internal mixer output
-  - **System Audio (Desktop)** — Windows WASAPI loopback for all desktop audio
+  - **System Audio (Desktop)** — Windows WASAPI loopback & Linux PipeWire / PulseAudio (`parec` / `pw-record`) monitor capture for all desktop audio
   - **Microphone** — live microphone / line-in capture
 - Live customization directly in the left sidebar while open (*Classic*, *Neon Pulse*, *Ocean Waves*, *Custom* colors, thickness, trail delay, shape, and frequency scale).
 - **Live 3-Line Synchronized Lyrics Overlay**: displays the previous, current, and upcoming lyric lines centered inside the AudioVisualizer window (previous & next lines smaller in soft gray, active line crisp & bright) with a toggle and **Top / Bottom** positioning directly in the sidebar.
@@ -79,7 +82,7 @@
 - **PC Folder Import & Drag-and-Drop**: import any local music folder via `+ Import` or drag & drop audio files straight into a playlist.
 - **Cover Art Manager**: one-click online cover fetching (saved locally in `<MusicFolder>/Covers/`) plus custom cover image support (permanently copied into `Covers/`).
 - **Queue & Repeat**: *Play Next*, *Add to Queue*, live Queue popover, and *Repeat Off / All / One*.
-- **Windows SMTC Integration**: responds natively to hardware media keys (Play/Pause, Next, Previous) and the Windows media overlay.
+- **Native OS Media Controls**: Windows SMTC & Linux MPRIS2 (D-Bus) integration — responds natively to hardware media keys (Play/Pause, Next, Previous) and desktop media overlays.
 
 <p align="center">
   <img src="docs/preview_import.png" alt="Rustify Local Playlist Import Modal" width="85%" />
@@ -87,11 +90,41 @@
 
 ---
 
-## Installation (Windows)
+## Installation
 
+### Windows
 1. Download **`Rustify-Setup.exe`** from the [**Latest Release**](https://github.com/Ilay-dev/Rustify/releases/latest).
 2. Run the installer, choose your install folder (defaults to `C:\Program Files\Rustify`), and finish setup.
 3. Launch **`Rustify`** directly from Windows Search or your Start Menu and select your local music folder in the setup wizard.
+
+### Linux — Ubuntu (22.04 / 24.04) & Linux Mint (21 / 22)
+1. Download **`rustify_1.4.0_amd64.deb`** from the [**Latest Release**](https://github.com/Ilay-dev/Rustify/releases/latest).
+2. Install via Software Center / GDebi, or in your terminal:
+   ```bash
+   sudo apt install ./rustify_1.4.0_amd64.deb
+   ```
+3. Launch **Rustify** from your application menu or run `rustify`.
+
+### Linux — Arch Linux (Manjaro / EndeavourOS / CachyOS)
+1. Download **`rustify-1.4.0-1-x86_64.pkg.tar.zst`** from the [**Latest Release**](https://github.com/Ilay-dev/Rustify/releases/latest).
+2. Install with `pacman`:
+   ```bash
+   sudo pacman -U rustify-1.4.0-1-x86_64.pkg.tar.zst
+   ```
+   *(Optional: install `pipewire-pulse` or `pulseaudio` for Desktop System Audio capture in the AudioVisualizer.)*
+3. Alternatively, build directly from source using the included [`linux/PKGBUILD`](linux/PKGBUILD):
+   ```bash
+   cd linux && makepkg -si
+   ```
+
+### Linux — Portable Tarball (Any x86_64 Distro)
+1. Download **`rustify-1.4.0-linux-x86_64.tar.gz`** from the [**Latest Release**](https://github.com/Ilay-dev/Rustify/releases/latest).
+2. Extract and install to `~/.local` (no `sudo` required):
+   ```bash
+   tar -xzf rustify-1.4.0-linux-x86_64.tar.gz
+   cd rustify-1.4.0-linux-x86_64
+   ./install.sh
+   ```
 
 ### Folder Structure Tip
 Rustify treats each subfolder inside your chosen Music Folder as a playlist:
@@ -126,20 +159,44 @@ Music/
 
 Requires the [Rust toolchain](https://rustup.rs/) (Rust 1.85+):
 
+### Linux Build Dependencies
+- **Ubuntu / Linux Mint**:
+  ```bash
+  sudo apt install libasound2-dev libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev \
+    libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libdbus-1-dev pkg-config
+  ```
+- **Arch Linux**:
+  ```bash
+  sudo pacman -S --needed base-devel rust alsa-lib gtk3 dbus libxkbcommon libglvnd curl
+  ```
+
+### Compile
 ```bash
 git clone https://github.com/Ilay-dev/Rustify.git
 cd Rustify
 cargo build --release
 ```
 
-The compiled executable will be located at `target/release/Rustify.exe`.
+The compiled executable will be located at `target/release/Rustify.exe` (Windows) or `target/release/Rustify` (Linux).
 
-### Building the Windows Installer
-With [Inno Setup 6](https://jrsoftware.org/isinfo.php) installed:
-```powershell
-iscc installer\Rustify.iss
-```
-This outputs `dist\Rustify-Setup.exe`.
+### Packaging
+- **Windows Installer** ([Inno Setup 6](https://jrsoftware.org/isinfo.php)):
+  ```powershell
+  iscc installer\Rustify.iss
+  ```
+  Outputs `dist\Rustify-Setup.exe`.
+- **Debian / Ubuntu / Mint `.deb`**:
+  ```bash
+  bash linux/build-deb.sh
+  ```
+- **Arch Linux `.pkg.tar.zst`**:
+  ```bash
+  bash linux/build-arch.sh
+  ```
+- **Portable Linux `.tar.gz`**:
+  ```bash
+  bash linux/build-tarball.sh
+  ```
 
 ---
 

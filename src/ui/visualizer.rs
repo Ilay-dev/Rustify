@@ -202,17 +202,41 @@ impl CaptureRing {
     }
 }
 
+#[allow(dead_code)]
+enum ExternalCapture {
+    Cpal(Stream),
+    #[cfg(target_os = "linux")]
+    LinuxPipe(LinuxPipeCapture),
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxPipeCapture {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    child: Arc<Mutex<Option<std::process::Child>>>,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for LinuxPipeCapture {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(mut child) = self.child.lock().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 /// 1:1 pure-Rust implementation of https://ilay-dev.github.io/AudioVizuallizer/
-/// Supports Rustify internal audio, Windows System Audio (WASAPI Loopback), and Microphone input.
+/// Supports Rustify internal audio, Desktop System Audio (Windows WASAPI Loopback / Linux PipeWire & PulseAudio), and Microphone input.
 pub struct AudioVisualizerState {
     pub open: bool,
     pub paused: bool,
     pub fullscreen: bool,
     pub config: VisualizerConfig,
 
-    // External cpal capture state for SystemAudio (WASAPI loopback) & Microphone
+    // External capture state for SystemAudio (WASAPI / PipeWire / PulseAudio) & Microphone
     active_capture_source: VisualizerAudioSource,
-    capture_stream: Option<Stream>,
+    capture_stream: Option<ExternalCapture>,
     capture_ring: Arc<Mutex<CaptureRing>>,
     pub capture_error: Option<String>,
 
@@ -521,36 +545,109 @@ impl AudioVisualizerState {
     }
 }
 
-fn build_external_capture_stream(
-    source: VisualizerAudioSource,
+#[cfg(target_os = "linux")]
+fn spawn_linux_audio_pipe(
+    program: &str,
+    args: &[&str],
     ring: Arc<Mutex<CaptureRing>>,
-) -> Result<Stream, String> {
-    let host = cpal::default_host();
-    let (device, supported_cfg) = match source {
-        VisualizerAudioSource::SystemAudio => {
-            // On Windows WASAPI, building an input stream on an output device automatically activates WASAPI Loopback!
-            let dev = host
-                .default_output_device()
-                .ok_or_else(|| "Kein System-Audio-Ausgabegerät gefunden".to_string())?;
-            let cfg = dev
-                .default_output_config()
-                .map_err(|e| format!("System-Audio-Konfiguration fehlgeschlagen: {e}"))?;
-            (dev, cfg)
-        }
-        VisualizerAudioSource::Microphone => {
-            let dev = host
-                .default_input_device()
-                .ok_or_else(|| "Kein Mikrofon gefunden".to_string())?;
-            let cfg = dev
-                .default_input_config()
-                .map_err(|e| format!("Mikrofon-Konfiguration fehlgeschlagen: {e}"))?;
-            (dev, cfg)
-        }
-        VisualizerAudioSource::RustifyApp => {
-            return Err("Invalid external source".to_string());
-        }
+) -> Result<LinuxPipeCapture, String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("{program} konnte nicht gestartet werden: {e}"))?;
+
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("{program} stdout nicht verfügbar"));
     };
 
+    {
+        let mut r = ring.lock();
+        r.sample_rate = 48000;
+        r.ring.fill(0.0);
+        r.write_idx = 0;
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_bg = stop.clone();
+    let child_arc = Arc::new(Mutex::new(Some(child)));
+    let child_bg = child_arc.clone();
+
+    let _ = std::thread::Builder::new()
+        .name(format!("rustify-{program}-capture"))
+        .spawn(move || {
+            let mut buf = [0u8; 4096];
+            let mut leftover = [0u8; 4];
+            let mut leftover_len = 0usize;
+
+            while !stop_bg.load(Ordering::Relaxed) {
+                match stdout.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let mut offset = 0usize;
+                        let mut r = ring.lock();
+                        if leftover_len > 0 {
+                            let need = 4 - leftover_len;
+                            if n < need {
+                                leftover[leftover_len..leftover_len + n]
+                                    .copy_from_slice(&buf[..n]);
+                                leftover_len += n;
+                                continue;
+                            }
+                            leftover[leftover_len..4].copy_from_slice(&buf[..need]);
+                            let sample = f32::from_le_bytes(leftover);
+                            if sample.is_finite() {
+                                r.push_sample(sample);
+                            }
+                            leftover_len = 0;
+                            offset = need;
+                        }
+
+                        let slice = &buf[offset..n];
+                        let chunks = slice.chunks_exact(4);
+                        let rem = chunks.remainder();
+                        for chunk in chunks {
+                            let sample =
+                                f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                            if sample.is_finite() {
+                                r.push_sample(sample);
+                            }
+                        }
+                        if !rem.is_empty() {
+                            leftover[..rem.len()].copy_from_slice(rem);
+                            leftover_len = rem.len();
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+
+            if let Some(mut c) = child_bg.lock().take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        });
+
+    Ok(LinuxPipeCapture {
+        stop,
+        child: child_arc,
+    })
+}
+
+fn build_cpal_input_stream(
+    device: &cpal::Device,
+    supported_cfg: cpal::SupportedStreamConfig,
+    ring: Arc<Mutex<CaptureRing>>,
+) -> Result<Stream, String> {
     let channels = supported_cfg.channels().max(1) as usize;
     let sample_rate = supported_cfg.sample_rate().0;
     let sample_format = supported_cfg.sample_format();
@@ -613,6 +710,98 @@ fn build_external_capture_stream(
         .play()
         .map_err(|e| format!("Audio-Stream Startfehler: {e}"))?;
     Ok(stream)
+}
+
+fn build_external_capture_stream(
+    source: VisualizerAudioSource,
+    ring: Arc<Mutex<CaptureRing>>,
+) -> Result<ExternalCapture, String> {
+    let host = cpal::default_host();
+    match source {
+        VisualizerAudioSource::SystemAudio => {
+            #[cfg(target_os = "windows")]
+            {
+                // On Windows WASAPI, building an input stream on an output device automatically activates WASAPI Loopback!
+                let dev = host
+                    .default_output_device()
+                    .ok_or_else(|| "Kein System-Audio-Ausgabegerät gefunden".to_string())?;
+                let cfg = dev
+                    .default_output_config()
+                    .map_err(|e| format!("System-Audio-Konfiguration fehlgeschlagen: {e}"))?;
+                Ok(ExternalCapture::Cpal(build_cpal_input_stream(&dev, cfg, ring)?))
+            }
+            #[cfg(target_os = "linux")]
+            {
+                // 1. PulseAudio / PipeWire-Pulse monitor stream (works on Arch, Ubuntu, Linux Mint)
+                if let Ok(pipe) = spawn_linux_audio_pipe(
+                    "parec",
+                    &[
+                        "--format=float32le",
+                        "--channels=1",
+                        "--rate=48000",
+                        "--latency-msec=20",
+                        "-d",
+                        "@DEFAULT_MONITOR@",
+                    ],
+                    ring.clone(),
+                ) {
+                    return Ok(ExternalCapture::LinuxPipe(pipe));
+                }
+
+                // 2. Fallback: native PipeWire recorder
+                if let Ok(pipe) = spawn_linux_audio_pipe(
+                    "pw-record",
+                    &["--format=f32", "--channels=1", "--rate=48000", "-"],
+                    ring.clone(),
+                ) {
+                    return Ok(ExternalCapture::LinuxPipe(pipe));
+                }
+
+                // 3. Fallback: search cpal input devices for a monitor/pulse/pipewire source
+                if let Ok(devices) = host.input_devices() {
+                    for dev in devices {
+                        let name = dev.name().unwrap_or_default().to_ascii_lowercase();
+                        if !(name.contains("monitor")
+                            || name.contains("pulse")
+                            || name.contains("pipewire"))
+                        {
+                            continue;
+                        }
+                        if let Ok(stream) = dev
+                            .default_input_config()
+                            .map_err(|e| e.to_string())
+                            .and_then(|cfg| build_cpal_input_stream(&dev, cfg, ring.clone()))
+                        {
+                            return Ok(ExternalCapture::Cpal(stream));
+                        }
+                    }
+                }
+
+                Err(
+                    "System-Audio-Capture nicht verfügbar (installiere pipewire-pulse oder pulseaudio-utils)"
+                        .to_string(),
+                )
+            }
+            #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+            {
+                let _ = (&host, &ring);
+                Err(
+                    "System-Audio-Loopback wird auf diesem Betriebssystem nicht unterstützt"
+                        .to_string(),
+                )
+            }
+        }
+        VisualizerAudioSource::Microphone => {
+            let dev = host
+                .default_input_device()
+                .ok_or_else(|| "Kein Mikrofon gefunden".to_string())?;
+            let cfg = dev
+                .default_input_config()
+                .map_err(|e| format!("Mikrofon-Konfiguration fehlgeschlagen: {e}"))?;
+            Ok(ExternalCapture::Cpal(build_cpal_input_stream(&dev, cfg, ring)?))
+        }
+        VisualizerAudioSource::RustifyApp => Err("Invalid external source".to_string()),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

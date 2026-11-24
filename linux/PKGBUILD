@@ -1,0 +1,40 @@
+# Maintainer: Ilay-dev <https://github.com/Ilay-dev/Rustify>
+pkgname=rustify
+pkgver=1.4.0
+pkgrel=1
+pkgdesc="Minimalist Dark Liquid-Glass Local Music Player & AI DJ Automixer"
+arch=('x86_64')
+url="https://github.com/Ilay-dev/Rustify"
+license=('MIT')
+depends=(
+  'alsa-lib'
+  'gtk3'
+  'dbus'
+  'libxkbcommon'
+  'libglvnd'
+  'curl'
+  'hicolor-icon-theme'
+)
+optdepends=(
+  'pipewire-pulse: Desktop System Audio capture for AudioVisualizer'
+  'pulseaudio: Alternative System Audio capture for AudioVisualizer'
+)
+makedepends=('rust' 'cargo' 'pkgconf')
+options=('!lto')
+source=("${pkgname}-${pkgver}.tar.gz::https://github.com/Ilay-dev/Rustify/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "${srcdir}/Rustify-${pkgver}"
+  export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
+  cargo build --release
+}
+
+package() {
+  cd "${srcdir}/Rustify-${pkgver}"
+  local bin_path="${CARGO_TARGET_DIR:-target}/release/Rustify"
+  install -Dm755 "${bin_path}" "${pkgdir}/usr/bin/rustify"
+  install -Dm644 "linux/rustify.desktop" "${pkgdir}/usr/share/applications/rustify.desktop"
+  install -Dm644 "assets/rustify_256.png" "${pkgdir}/usr/share/icons/hicolor/256x256/apps/rustify.png"
+  install -Dm644 "LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

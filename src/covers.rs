@@ -144,9 +144,21 @@ fn strip_search_tags(raw: &str) -> String {
     }
 }
 
+fn curl_bin() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "curl.exe"
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "curl"
+    }
+}
+
 fn curl_get_bytes(url: &str) -> Result<Vec<u8>, String> {
     let safe_url = crate::config::validate_http_url(url)?;
-    let mut cmd = Command::new("curl.exe");
+    let bin = curl_bin();
+    let mut cmd = Command::new(bin);
     #[cfg(target_os = "windows")]
     {
         cmd.creation_flags(CREATE_NO_WINDOW);
@@ -156,7 +168,7 @@ fn curl_get_bytes(url: &str) -> Result<Vec<u8>, String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
-        .map_err(|e| format!("Failed to run curl.exe: {e}"))?;
+        .map_err(|e| format!("Failed to run {bin}: {e}"))?;
 
     if !output.status.success() || output.stdout.is_empty() {
         return Err("curl request failed or returned empty data".to_string());
