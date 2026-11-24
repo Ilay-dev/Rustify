@@ -32,6 +32,8 @@ jobs:
             libxcb-shape0-dev \
             libxcb-xfixes0-dev \
             libxkbcommon-dev \
+            libxkbcommon-x11-0 \
+            libxkbcommon-x11-dev \
             libssl-dev \
             libdbus-1-dev \
             pkg-config \
@@ -123,6 +125,7 @@ jobs:
             gtk3 \
             dbus \
             libxkbcommon \
+            libxkbcommon-x11 \
             libglvnd \
             curl \
             hicolor-icon-theme \

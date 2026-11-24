@@ -11,6 +11,7 @@ depends=(
   'gtk3'
   'dbus'
   'libxkbcommon'
+  'libxkbcommon-x11'
   'libglvnd'
   'curl'
   'hicolor-icon-theme'

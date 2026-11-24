@@ -36,7 +36,7 @@ Priority: optional
 Architecture: amd64
 Maintainer: Ilay-dev <https://github.com/Ilay-dev/Rustify>
 Homepage: https://github.com/Ilay-dev/Rustify
-Depends: libasound2 | libasound2t64, libgtk-3-0 | libgtk-3-0t64, libdbus-1-3, libxkbcommon0, libgl1, curl
+Depends: libasound2 | libasound2t64, libgtk-3-0 | libgtk-3-0t64, libdbus-1-3, libxkbcommon0, libxkbcommon-x11-0, libgl1, curl
 Recommends: pipewire-pulse | pulseaudio-utils
 Installed-Size: ${INSTALLED_SIZE}
 Description: Minimalist Dark Liquid-Glass Local Music Player & AI DJ Automixer
