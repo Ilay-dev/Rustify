@@ -80,7 +80,9 @@ fn main() -> eframe::Result<()> {
         renderer: eframe::Renderer::Glow,
         centered: true,
         vsync: true,
-        multisampling: 4,
+        // On Linux (X11/Wayland/Mesa), requesting 4x MSAA fails with NoGlutinConfigs on many drivers/compositors;
+        // egui already applies smooth per-primitive feathering AA natively.
+        multisampling: if cfg!(target_os = "windows") { 4 } else { 0 },
         ..Default::default()
     };
 
