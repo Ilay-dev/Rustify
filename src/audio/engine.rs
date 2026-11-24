@@ -1345,8 +1345,7 @@ impl AudioEngine {
                 let lo = EDGES[band];
                 let hi = EDGES[band + 1];
                 let mut peak = 0.0f32;
-                for b in lo..hi {
-                    let c = self.fft_buf[b];
+                for &c in &self.fft_buf[lo..hi] {
                     let mag = (c.re * c.re + c.im * c.im).sqrt() / 32.0;
                     if mag > peak {
                         peak = mag;

@@ -612,11 +612,9 @@ fn spawn_linux_audio_pipe(
                         }
 
                         let slice = &buf[offset..n];
-                        let chunks = slice.chunks_exact(4);
-                        let rem = chunks.remainder();
-                        for chunk in chunks {
-                            let sample =
-                                f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                        let (chunks, rem) = slice.as_chunks::<4>();
+                        for &chunk in chunks {
+                            let sample = f32::from_le_bytes(chunk);
                             if sample.is_finite() {
                                 r.push_sample(sample);
                             }
